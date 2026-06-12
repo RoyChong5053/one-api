@@ -224,7 +224,11 @@ func Relay(c *gin.Context) {
 	// Automatically calculate retry count from available channels when
 	// ChannelRetryExhaustAll is enabled or RetryTimes is zero.
 	if config.ChannelRetryExhaustAll || retryTimes <= 0 {
+		// Try in-memory cache first; fall back to DB query if cache is disabled or empty.
 		channels, err := dbmodel.GetChannelsFromCache(group, originalModel)
+		if err != nil || len(channels) <= 1 {
+			channels, err = dbmodel.FetchChannelsForModel(group, originalModel)
+		}
 		if err == nil && len(channels) > 1 {
 			var available int
 			for _, ch := range channels {
@@ -234,6 +238,9 @@ func Relay(c *gin.Context) {
 			}
 			if available > 1 {
 				retryTimes = available
+				lg.Info("retry count auto-calculated from available channels",
+					zap.Int("available_channels", available),
+				)
 			}
 		}
 	}

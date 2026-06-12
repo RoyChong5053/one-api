@@ -568,6 +568,37 @@ func GetChannelsFromCache(group string, model string) ([]*Channel, error) {
 	return candidateChannels, nil
 }
 
+// FetchChannelsForModel queries the database directly for enabled, non-suspended
+// channels that support the given group and model. This acts as a fallback when
+// the in-memory cache is disabled or hasn't been populated yet.
+func FetchChannelsForModel(group, model string) ([]*Channel, error) {
+	groupCol := "`group`"
+	trueVal := "1"
+	if common.UsingPostgreSQL.Load() {
+		groupCol = `"group"`
+		trueVal = "true"
+	}
+
+	var channelIDs []int
+	now := time.Now()
+	if err := DB.Model(&Ability{}).
+		Where(groupCol+" = ? AND model = ? AND enabled = "+trueVal+" AND (suspend_until IS NULL OR suspend_until < ?)",
+			group, model, now).
+		Pluck("channel_id", &channelIDs).Error; err != nil {
+		return nil, errors.Wrap(err, "query abilities for model channels")
+	}
+	if len(channelIDs) == 0 {
+		return nil, errors.Errorf("no channels available for model %s in group %s", model, group)
+	}
+
+	var channels []*Channel
+	if err := DB.Where("id IN (?) AND status = ?", channelIDs, ChannelStatusEnabled).Find(&channels).Error; err != nil {
+		return nil, errors.Wrap(err, "load channels from DB")
+	}
+
+	return channels, nil
+}
+
 func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority bool) (*Channel, error) {
 	if !config.MemoryCacheEnabled {
 		return GetRandomSatisfiedChannel(group, model, ignoreFirstPriority)
