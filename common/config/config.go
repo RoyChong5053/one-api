@@ -447,6 +447,58 @@ var (
 	// Default: 120 (2 minutes)
 	// Unit: seconds
 	SyncFrequency = env.Int("SYNC_FREQUENCY", 2*60)
+
+	// ChannelHealthWindowSize defines the sliding window size for tracking channel
+	// health. A larger window smooths out transient blips but reacts slower to
+	// sustained degradation.
+	//
+	// Environment variable: CHANNEL_HEALTH_WINDOW_SIZE
+	// Default: 50
+	// Unit: requests
+	ChannelHealthWindowSize = env.Int("CHANNEL_HEALTH_WINDOW_SIZE", 50)
+
+	// ChannelHealthThreshold defines the minimum success rate below which a
+	// channel is considered degraded. Degraded channels are deprioritised during
+	// selection but not fully excluded unless explicitly suspended.
+	//
+	// Environment variable: CHANNEL_HEALTH_THRESHOLD
+	// Default: 0.3 (30%)
+	// Range: 0.0 – 1.0
+	ChannelHealthThreshold = env.Float64("CHANNEL_HEALTH_THRESHOLD", 0.3)
+
+	// ChannelSuspendBackoffBase is the initial suspension duration used by the
+	// exponential-backoff circuit breaker. Each consecutive failure multiplies
+	// this value by ChannelSuspendBackoffMultiplier.
+	//
+	// Environment variable: CHANNEL_SUSPEND_BACKOFF_BASE
+	// Default: 60 (seconds)
+	// Unit: seconds
+	ChannelSuspendBackoffBase = time.Second * time.Duration(env.Int("CHANNEL_SUSPEND_BACKOFF_BASE", 60))
+
+	// ChannelSuspendBackoffMultiplier is the exponential factor applied to each
+	// consecutive failure. Duration = base * multiplier^(failures-1), capped by
+	// ChannelSuspendBackoffMax.
+	//
+	// Environment variable: CHANNEL_SUSPEND_BACKOFF_MULTIPLIER
+	// Default: 5
+	ChannelSuspendBackoffMultiplier = env.Int("CHANNEL_SUSPEND_BACKOFF_MULTIPLIER", 5)
+
+	// ChannelSuspendBackoffMax caps the maximum suspension duration for the
+	// exponential-backoff circuit breaker. Set this to ~24 h for providers
+	// with daily quota resets (e.g. Google AI Studio).
+	//
+	// Environment variable: CHANNEL_SUSPEND_BACKOFF_MAX
+	// Default: 86400 (24 hours)
+	// Unit: seconds
+	ChannelSuspendBackoffMax = time.Second * time.Duration(env.Int("CHANNEL_SUSPEND_BACKOFF_MAX", 86400))
+
+	// ChannelRetryExhaustAll makes the relay try every available channel for
+	// a model/group before returning a terminal error. When true, the retry
+	// count is automatically derived from the number of candidate channels.
+	//
+	// Environment variable: CHANNEL_RETRY_EXHAUST_ALL
+	// Default: true
+	ChannelRetryExhaustAll = env.Bool("CHANNEL_RETRY_EXHAUST_ALL", true)
 )
 
 // =============================================================================

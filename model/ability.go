@@ -247,7 +247,9 @@ func GetGroupModelsV2(ctx context.Context, group string) ([]dto.EnabledAbility, 
 	return models, nil
 }
 
-// SuspendAbility sets the SuspendUntil timestamp for a given ability.
+// SuspendAbility sets the SuspendUntil timestamp for a given ability and
+// immediately invalidates the in-memory channel cache so that subsequent
+// requests skip this channel without waiting for SYNC_FREQUENCY.
 func SuspendAbility(ctx context.Context, group string, modelName string, channelId int, duration time.Duration) error {
 	if group == "" || modelName == "" || channelId == 0 {
 		return errors.New("group, modelName, and channelId must be specified for suspending ability")
@@ -264,10 +266,19 @@ func SuspendAbility(ctx context.Context, group string, modelName string, channel
 		channelCol = `"channel_id"`
 	}
 
-	return DB.Model(&Ability{}).
+	err := DB.Model(&Ability{}).
 		Where(groupCol+" = ? AND "+modelCol+" = ? AND "+channelCol+" = ?",
 			group, modelName, channelId).
 		Update("suspend_until", suspendTime).Error
+	if err != nil {
+		return err
+	}
+
+	// Immediately mark the channel as unavailable in the in-memory cache
+	// so the next request skips it without waiting for SYNC_FREQUENCY.
+	InvalidateChannelInCache(channelId, duration)
+	RecordChannelFailure(channelId)
+	return nil
 }
 
 func GetRandomSatisfiedChannelExcluding(group string, model string, ignoreFirstPriority bool, excludeChannelIds map[int]bool) (*Channel, error) {

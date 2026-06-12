@@ -304,6 +304,160 @@ func CacheGetGroupModelsV2(ctx context.Context, group string) (models []dto.Enab
 var group2model2channels map[string]map[string][]*Channel
 var channelSyncLock sync.RWMutex
 
+// ---------------------------------------------------------------------------
+// Channel health tracking and instant circuit-breaking
+// ---------------------------------------------------------------------------
+
+// channelHealth holds the sliding-window health state for a single channel.
+type channelHealth struct {
+	mu                  sync.RWMutex
+	successes           []bool       // ring buffer of recent outcomes
+	consecutiveFailures int          // consecutive failures since last success
+}
+
+var (
+	// channelHealthStore tracks per-channel health for weighted selection.
+	channelHealthStore = make(map[int]*channelHealth)
+	channelHealthLock  sync.RWMutex
+
+	// suspendedChannels holds channels that have been temporarily excluded
+	// from selection by the in-memory circuit breaker (before the periodic
+	// SYNC_FREQUENCY cache rebuild picks up the DB suspension).
+	// The value is the time until which the channel is excluded.
+	suspendedChannels   = make(map[int]time.Time)
+	suspendedChannelsMu sync.RWMutex
+)
+
+// getOrCreateChannelHealth returns the health tracker for a channel, creating
+// one if it does not yet exist.
+func getOrCreateChannelHealth(channelId int) *channelHealth {
+	channelHealthLock.Lock()
+	defer channelHealthLock.Unlock()
+	h, ok := channelHealthStore[channelId]
+	if !ok {
+		h = &channelHealth{
+			successes: make([]bool, 0, config.ChannelHealthWindowSize),
+		}
+		channelHealthStore[channelId] = h
+	}
+	return h
+}
+
+// RecordChannelSuccess records a successful relay for the given channel and
+// resets its consecutive-failure counter.
+func RecordChannelSuccess(channelId int) {
+	h := getOrCreateChannelHealth(channelId)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.consecutiveFailures = 0
+	if len(h.successes) >= config.ChannelHealthWindowSize {
+		h.successes = h.successes[1:]
+	}
+	h.successes = append(h.successes, true)
+}
+
+// RecordChannelFailure records a failed relay for the given channel and
+// increments its consecutive-failure counter.
+func RecordChannelFailure(channelId int) {
+	h := getOrCreateChannelHealth(channelId)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.consecutiveFailures++
+	if len(h.successes) >= config.ChannelHealthWindowSize {
+		h.successes = h.successes[1:]
+	}
+	h.successes = append(h.successes, false)
+}
+
+// GetChannelHealthScore returns a value in [0, 1] representing the recent
+// success rate. 1.0 means 100 % successful; 0 means the window is empty (treat as healthy).
+func GetChannelHealthScore(channelId int) float64 {
+	h := getOrCreateChannelHealth(channelId)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.successes) == 0 {
+		return 1.0
+	}
+	var successCount int
+	for _, s := range h.successes {
+		if s {
+			successCount++
+		}
+	}
+	return float64(successCount) / float64(len(h.successes))
+}
+
+// GetConsecutiveChannelFailures returns the number of consecutive failures
+// for the given channel since its last success.
+func GetConsecutiveChannelFailures(channelId int) int {
+	h := getOrCreateChannelHealth(channelId)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.consecutiveFailures
+}
+
+// ResetConsecutiveChannelFailures resets the consecutive-failure counter.
+func ResetConsecutiveChannelFailures(channelId int) {
+	h := getOrCreateChannelHealth(channelId)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.consecutiveFailures = 0
+}
+
+// InvalidateChannelInCache marks a channel as temporarily unavailable in
+// the in-memory cache so that subsequent requests skip it. The exclusion
+// lasts for the given duration, after which the channel may be selected again.
+// This is a fast-path before the periodic SYNC_FREQUENCY cache rebuild.
+func InvalidateChannelInCache(channelId int, duration time.Duration) {
+	suspendedChannelsMu.Lock()
+	defer suspendedChannelsMu.Unlock()
+	suspendedChannels[channelId] = time.Now().Add(duration)
+}
+
+// removeExpiredSuspensions cleans up entries whose suspension has expired.
+// Called periodically and during channel selection.
+func removeExpiredSuspensions() {
+	now := time.Now()
+	suspendedChannelsMu.Lock()
+	defer suspendedChannelsMu.Unlock()
+	for id, until := range suspendedChannels {
+		if now.After(until) {
+			delete(suspendedChannels, id)
+		}
+	}
+}
+
+// isChannelSuspendedInCache reports whether the channel is currently excluded
+// by the in-memory circuit breaker.
+func isChannelSuspendedInCache(channelId int) bool {
+	suspendedChannelsMu.RLock()
+	defer suspendedChannelsMu.RUnlock()
+	until, ok := suspendedChannels[channelId]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		return false
+	}
+	return true
+}
+
+// rebuildSuspendedChannelsFromDB reloads suspension state from the abilities
+// table. This is called alongside InitChannelCache to keep the fast-path in sync.
+func rebuildSuspendedChannelsFromDB() {
+	var abilities []*Ability
+	DB.Find(&abilities)
+	now := time.Now()
+
+	suspendedChannelsMu.Lock()
+	defer suspendedChannelsMu.Unlock()
+	for _, a := range abilities {
+		if a.SuspendUntil != nil && a.SuspendUntil.After(now) {
+			suspendedChannels[a.ChannelId] = *a.SuspendUntil
+		}
+	}
+}
+
 func InitChannelCache() {
 	newChannelId2channel := make(map[int]*Channel)
 	var channels []*Channel
@@ -371,6 +525,11 @@ func InitChannelCache() {
 	channelSyncLock.Lock()
 	group2model2channels = newGroup2model2channels
 	channelSyncLock.Unlock()
+
+	// Rebuild the fast-path in-memory suspension map so that the circuit breaker
+	// does not need to wait for the next periodic sync.
+	rebuildSuspendedChannelsFromDB()
+
 	logger.Logger.Info("channels synced from database, considering suspensions")
 }
 
@@ -379,6 +538,15 @@ func SyncChannelCache(frequency int) {
 		time.Sleep(time.Duration(frequency) * time.Second)
 		logger.Logger.Info("syncing channels from database")
 		InitChannelCache()
+	}
+}
+
+// CleanExpiredSuspensions periodically removes expired in-memory suspension
+// entries. Call this in a background goroutine on startup.
+func CleanExpiredSuspensions() {
+	for {
+		time.Sleep(30 * time.Second)
+		removeExpiredSuspensions()
 	}
 }
 
@@ -502,11 +670,16 @@ func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPrior
 	return channel, nil
 }
 
-// CacheGetRandomSatisfiedChannelExcluding gets a random satisfied channel while excluding specified channel IDs
+// CacheGetRandomSatisfiedChannelExcluding gets a random satisfied channel while excluding specified channel IDs.
+// It also skips channels in the in-memory suspension map and weights selection by health score within the same
+// priority tier.
 func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreFirstPriority bool, excludeChannelIds map[int]bool, tryLargerMaxTokens bool) (*Channel, error) {
 	if !config.MemoryCacheEnabled {
 		return GetRandomSatisfiedChannelExcluding(group, model, ignoreFirstPriority, excludeChannelIds)
 	}
+
+	removeExpiredSuspensions()
+
 	channelSyncLock.RLock()
 	channelsFromCache := group2model2channels[group][model]
 
@@ -515,12 +688,16 @@ func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreF
 		return nil, errors.New("channel not found in memory cache")
 	}
 
-	// Filter out excluded channels
+	// Filter out excluded channels and in-memory suspended channels
 	var candidateChannels []*Channel
 	for _, channel := range channelsFromCache {
-		if !excludeChannelIds[channel.Id] {
-			candidateChannels = append(candidateChannels, channel)
+		if excludeChannelIds[channel.Id] {
+			continue
 		}
+		if isChannelSuspendedInCache(channel.Id) {
+			continue
+		}
+		candidateChannels = append(candidateChannels, channel)
 	}
 
 	// For HTTP Code 413
@@ -572,9 +749,8 @@ func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreF
 
 		// If there are lower priority channels available, select from them
 		if endIdx < len(candidateChannels) {
-			idx := random.RandRange(endIdx, len(candidateChannels))
-			channel := candidateChannels[idx]
-			logger.Logger.Info("select channel in cache", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
+			channel := selectByHealthWeight(candidateChannels[endIdx:], model)
+			logger.Logger.Info("select channel in cache (lower priority, health-weighted)", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
 			return channel, nil
 		} else {
 			// No lower priority channels available, return error to indicate we should try a different approach
@@ -608,9 +784,46 @@ func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreF
 			return nil, errors.New("no channels with maximum priority available")
 		}
 
-		idx := rand.Intn(len(maxPriorityChannels))
-		channel := maxPriorityChannels[idx]
-		logger.Logger.Info("select channel in cache", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
+		channel := selectByHealthWeight(maxPriorityChannels, model)
+		logger.Logger.Info("select channel in cache (highest priority, health-weighted)", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
 		return channel, nil
 	}
+}
+
+// selectByHealthWeight picks a channel using health-weighted random selection.
+// Healthier channels (higher recent success rate) are more likely to be chosen.
+func selectByHealthWeight(channels []*Channel, model string) *Channel {
+	if len(channels) == 0 {
+		return nil
+	}
+	if len(channels) == 1 {
+		return channels[0]
+	}
+
+	// Build a weight for each channel based on its health score.
+	// A minimum weight of 0.1 prevents completely starving degraded channels
+	// that might have recovered.
+	weights := make([]float64, len(channels))
+	var totalWeight float64
+	const minWeight = 0.1
+	for i, ch := range channels {
+		score := GetChannelHealthScore(ch.Id)
+		w := score
+		if w < minWeight {
+			w = minWeight
+		}
+		weights[i] = w
+		totalWeight += w
+	}
+
+	// Weighted random selection
+	r := rand.Float64() * totalWeight
+	var cumulative float64
+	for i, w := range weights {
+		cumulative += w
+		if r < cumulative {
+			return channels[i]
+		}
+	}
+	return channels[len(channels)-1]
 }

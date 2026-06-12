@@ -112,6 +112,7 @@ func main() {
 	if config.MemoryCacheEnabled {
 		go model.SyncOptions(config.SyncFrequency)
 		go model.SyncChannelCache(config.SyncFrequency)
+		go model.CleanExpiredSuspensions()
 	}
 	mcp.StartAutoSync(ctx)
 	if config.ChannelTestFrequency > 0 {

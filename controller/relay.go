@@ -101,6 +101,7 @@ func Relay(c *gin.Context) {
 	bizErr := relayHelper(c, relayMode)
 	if bizErr == nil {
 		monitor.Emit(channelId, true)
+		dbmodel.RecordChannelSuccess(channelId)
 
 		// Record successful relay request metrics
 		PrometheusMonitor.RecordRelayRequest(c, relayMeta, startTime, true, 0, 0, 0)
@@ -220,6 +221,26 @@ func Relay(c *gin.Context) {
 	failedChannels := make(map[int]bool)
 	failedChannels[lastFailedChannelId] = true
 
+	// Automatically calculate retry count from available channels when
+	// ChannelRetryExhaustAll is enabled or RetryTimes is zero.
+	if config.ChannelRetryExhaustAll || retryTimes <= 0 {
+		channels, err := dbmodel.GetChannelsFromCache(group, originalModel)
+		if err == nil && len(channels) > 1 {
+			var available int
+			for _, ch := range channels {
+				if !failedChannels[ch.Id] {
+					available++
+				}
+			}
+			if available > 1 {
+				retryTimes = available
+			}
+		}
+	}
+	if retryTimes <= 0 {
+		retryTimes = 1
+	}
+
 	// Debug logging to track channel exclusions (only when debug is enabled)
 	if config.DebugEnabled {
 		if retryTimes > 0 {
@@ -336,6 +357,7 @@ func Relay(c *gin.Context) {
 		bizErr = relayHelper(c, relayMode)
 		if bizErr == nil {
 			// Record successful retry
+			dbmodel.RecordChannelSuccess(c.GetInt(ctxkey.ChannelId))
 			PrometheusMonitor.RecordRelayRequest(c, retryMeta, retryStartTime, true, 0, 0, 0)
 			return
 		}
@@ -344,6 +366,7 @@ func Relay(c *gin.Context) {
 		PrometheusMonitor.RecordRelayRequest(c, retryMeta, retryStartTime, false, 0, 0, 0)
 
 		channelId = c.GetInt(ctxkey.ChannelId)
+		dbmodel.RecordChannelFailure(channelId)
 		failedChannels[channelId] = true // Track this failed channel
 		lastFailedChannelId = channelId
 
@@ -378,13 +401,16 @@ func Relay(c *gin.Context) {
 	}
 
 	if bizErr != nil {
-		if bizErr.StatusCode == http.StatusTooManyRequests {
-			// Provide more specific messaging for 429 errors after exhausting retries
-			if len(failedChannels) > 1 {
-				bizErr.Error.Message = fmt.Sprintf("All available channels (%d) for this model are currently rate limited, please try again later", len(failedChannels)) // Message for client, not logger
-			} else {
-				bizErr.Error.Message = "The current group load is saturated, please try again later"
-			}
+		if len(failedChannels) > 1 {
+			// Multiple channels were tried and all failed — mask upstream error details
+			// with a generic message so that the consuming agent does not see provider-
+			// specific error text. The full error chain is still in the logs.
+			bizErr.Error.Message = fmt.Sprintf("All %d available channels for this model failed, please try again later", len(failedChannels))
+			bizErr.Error.Type = model.ErrorTypeOneAPI
+			bizErr.Error.Code = "all_channels_failed"
+		} else if bizErr.StatusCode == http.StatusTooManyRequests {
+			// Single channel 429
+			bizErr.Error.Message = "The current group load is saturated, please try again later"
 		}
 
 		// BUG: bizErr is in race condition
@@ -398,11 +424,14 @@ func Relay(c *gin.Context) {
 	}
 }
 
-// shouldRetry returns nil if should retry, otherwise returns error
+// shouldRetry returns nil if should retry, otherwise returns error.
+// The modern behaviour is to retry on every error except user-initiated cancellation
+// and fixed channel ID requests, so that the relay always attempts to find a working
+// channel before giving up.
 func shouldRetry(c *gin.Context, statusCode int, rawErr error) error {
 	if specificChannelId := c.GetInt(ctxkey.SpecificChannelId); specificChannelId != 0 {
 		return errors.Errorf(
-			"specific channel ID (%d) was provided, retry is unvailable",
+			"specific channel ID (%d) was provided, retry is unavailable",
 			specificChannelId)
 	}
 
@@ -415,17 +444,8 @@ func shouldRetry(c *gin.Context, statusCode int, rawErr error) error {
 		}
 	}
 
-	// Do not retry on client-request errors except for rate limit (429), capacity (413), and auth (401/403)
-	// 404 should NOT retry, so it must not be excluded here.
-	if statusCode >= 400 &&
-		statusCode < 500 &&
-		statusCode != http.StatusTooManyRequests &&
-		statusCode != http.StatusRequestEntityTooLarge &&
-		statusCode != http.StatusUnauthorized &&
-		statusCode != http.StatusForbidden {
-		return errors.Errorf("client error %d, not retrying", statusCode)
-	}
-
+	// All other errors are retryable. The relay will try every available channel
+	// until one succeeds or all are exhausted.
 	return nil
 }
 
@@ -741,6 +761,32 @@ func isExpectedChannelSelectionExhaustedError(err error) bool {
 	return strings.Contains(errMsg, "channel not found in memory cache")
 }
 
+// calculateBackoffDuration returns the suspension duration for a channel using
+// exponential backoff based on consecutive failure count.
+//
+// The formula is: base * multiplier^(failures-1), capped at max.
+// For auth/quota errors (which are unlikely to self-recover quickly), the max
+// duration is returned immediately.
+func calculateBackoffDuration(channelId int, isAuthOrQuota bool) time.Duration {
+	if isAuthOrQuota {
+		return config.ChannelSuspendBackoffMax
+	}
+
+	consecutiveFailures := dbmodel.GetConsecutiveChannelFailures(channelId)
+	if consecutiveFailures < 1 {
+		consecutiveFailures = 1
+	}
+
+	duration := config.ChannelSuspendBackoffBase
+	for i := 1; i < consecutiveFailures; i++ {
+		duration *= time.Duration(config.ChannelSuspendBackoffMultiplier)
+		if duration >= config.ChannelSuspendBackoffMax {
+			return config.ChannelSuspendBackoffMax
+		}
+	}
+	return duration
+}
+
 func processChannelRelayError(ctx context.Context, params processChannelRelayErrorParams) {
 	// Always use a local logger variable
 	lg := gmw.GetLogger(ctx)
@@ -798,17 +844,17 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 	}
 
 	if params.Err.StatusCode == http.StatusTooManyRequests {
-		// For 429, we will suspend the specific model for a while
+		backoff := calculateBackoffDuration(params.ChannelId, false)
 		lg.Error("ability suspended due to rate limit (429)",
 			appendRelayFailureFields(params,
 				zap.Error(params.Err.RawError),
 				zap.String("suspension_rationale", "upstream rate limit exceeded; suspending ability to allow cooldown"),
-				zap.Duration("suspension_duration", config.ChannelSuspendSecondsFor429),
+				zap.Duration("suspension_duration", backoff),
 			)...,
 		)
 		if suspendErr := dbmodel.SuspendAbility(ctx,
 			params.Group, params.OriginalModel, params.ChannelId,
-			config.ChannelSuspendSecondsFor429); suspendErr != nil {
+			backoff); suspendErr != nil {
 			lg.Error("failed to suspend ability for channel",
 				appendRelayFailureFields(params,
 					zap.Error(errors.Wrap(suspendErr, "suspend ability failed")),
@@ -846,14 +892,15 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 			return
 		}
 
+		backoff := calculateBackoffDuration(params.ChannelId, false)
 		lg.Error("ability suspended due to server error (5xx)",
 			appendRelayFailureFields(params,
 				zap.Error(params.Err.RawError),
 				zap.String("suspension_rationale", "upstream server error; suspending ability to allow recovery"),
-				zap.Duration("suspension_duration", config.ChannelSuspendSecondsFor5XX),
+				zap.Duration("suspension_duration", backoff),
 			)...,
 		)
-		if suspendErr := dbmodel.SuspendAbility(ctx, params.Group, params.OriginalModel, params.ChannelId, config.ChannelSuspendSecondsFor5XX); suspendErr != nil {
+		if suspendErr := dbmodel.SuspendAbility(ctx, params.Group, params.OriginalModel, params.ChannelId, backoff); suspendErr != nil {
 			lg.Error("failed to suspend ability for 5xx",
 				appendRelayFailureFields(params,
 					zap.Error(errors.Wrap(suspendErr, "suspend ability failed")),
@@ -865,16 +912,19 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 		return
 	}
 
-	// Auth/permission/quota errors (401/403 or vendor-indicated) -> suspend ability; escalate to auto-disable only if fatal
-	if params.Err.StatusCode == http.StatusUnauthorized || params.Err.StatusCode == http.StatusForbidden || classifyAuthLike(&params.Err) {
+	// Auth/permission/quota errors (401/403 or vendor-indicated) -> suspend ability with
+	// exponential backoff (fatal errors jump to max); escalate to auto-disable only if fatal.
+	isAuthQuota := params.Err.StatusCode == http.StatusUnauthorized || params.Err.StatusCode == http.StatusForbidden || classifyAuthLike(&params.Err)
+	if isAuthQuota {
+		backoff := calculateBackoffDuration(params.ChannelId, true)
 		lg.Error("ability suspended due to auth/permission error",
 			appendRelayFailureFields(params,
 				zap.Error(params.Err.RawError),
 				zap.String("suspension_rationale", "authentication or permission failure; suspending ability pending credential verification"),
-				zap.Duration("suspension_duration", config.ChannelSuspendSecondsForAuth),
+				zap.Duration("suspension_duration", backoff),
 			)...,
 		)
-		if suspendErr := dbmodel.SuspendAbility(ctx, params.Group, params.OriginalModel, params.ChannelId, config.ChannelSuspendSecondsForAuth); suspendErr != nil {
+		if suspendErr := dbmodel.SuspendAbility(ctx, params.Group, params.OriginalModel, params.ChannelId, backoff); suspendErr != nil {
 			lg.Error("failed to suspend ability for auth/permission",
 				appendRelayFailureFields(params,
 					zap.Error(errors.Wrap(suspendErr, "suspend ability failed")),
