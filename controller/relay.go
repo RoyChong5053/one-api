@@ -403,11 +403,12 @@ func Relay(c *gin.Context) {
 	if bizErr != nil {
 		if len(failedChannels) > 1 {
 			// Multiple channels were tried and all failed — mask upstream error details
-			// with a generic message so that the consuming agent does not see provider-
-			// specific error text. The full error chain is still in the logs.
+			// with a generic message and a uniform 503 status code so that the consuming
+			// agent does not see provider-specific error text or confusing codes like 410.
 			bizErr.Error.Message = fmt.Sprintf("All %d available channels for this model failed, please try again later", len(failedChannels))
 			bizErr.Error.Type = model.ErrorTypeOneAPI
 			bizErr.Error.Code = "all_channels_failed"
+			bizErr.StatusCode = http.StatusServiceUnavailable
 		} else if bizErr.StatusCode == http.StatusTooManyRequests {
 			// Single channel 429
 			bizErr.Error.Message = "The current group load is saturated, please try again later"
