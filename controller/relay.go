@@ -117,6 +117,10 @@ func Relay(c *gin.Context) {
 	tokenId := c.GetInt(ctxkey.TokenId)
 	actualModel := relayMeta.ActualModelName
 	requestURL := c.Request.URL.String()
+	// Record the failure for the initial attempt before calculating backoff,
+	// so that exponential backoff sees the incremented consecutive-failure
+	// counter and escalates the suspension duration correctly.
+	dbmodel.RecordChannelFailure(lastFailedChannelId)
 	// Ensure channel error processing is completed during graceful drain
 	graceful.GoCritical(ctx, "processChannelRelayError", func(ctx context.Context) {
 		processChannelRelayError(ctx, processChannelRelayErrorParams{
