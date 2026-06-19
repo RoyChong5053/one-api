@@ -1010,7 +1010,7 @@ export function ChannelsPage() {
 
   return (
     <>
-      <ResponsivePageContainer
+      <ResponsivePageContainer maxWidth="full"
         title={t('channels.title')}
         description={t('channels.description')}
         actions={

@@ -56,17 +56,18 @@ export function ResponsiveContainer({
 interface ResponsivePageContainerProps {
   children: ReactNode;
   className?: string;
+  maxWidth?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '3xl' | '4xl' | '5xl' | '6xl' | '7xl' | 'full';
   title?: string;
   description?: string;
   actions?: ReactNode;
   breadcrumbs?: ReactNode;
 }
 
-export function ResponsivePageContainer({ children, className, title, description, actions, breadcrumbs }: ResponsivePageContainerProps) {
+export function ResponsivePageContainer({ children, className, maxWidth = '7xl', title, description, actions, breadcrumbs }: ResponsivePageContainerProps) {
   const { isMobile } = useResponsive();
 
   return (
-    <ResponsiveContainer maxWidth="7xl" padding="md" className={className}>
+    <ResponsiveContainer maxWidth={maxWidth} padding="md" className={className}>
       {/* Page Header */}
       {(title || description || actions || breadcrumbs) && (
         <div className={cn('mb-4 md:mb-6', isMobile ? 'space-y-3' : 'space-y-2')}>
