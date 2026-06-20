@@ -873,6 +873,25 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 				)...,
 			)
 		}
+
+		// Escalate to channel-level auto-disable after repeated 429s.
+		// RecordChannelFailure (relay.go:123) was already called before this function,
+		// so consecutiveFailures reflects the incremented count.
+		// This preserves per-request retry (other channels are tried) while ensuring
+		// a persistently rate-limited channel is eventually taken out of rotation.
+		// Auto-enable later via AutomaticallyTestChannels(scope=auto_disabled).
+		consecutiveFailures := dbmodel.GetConsecutiveChannelFailures(params.ChannelId)
+		if consecutiveFailures >= 3 {
+			lg.Error("channel disabled due to repeated rate limit (429)",
+				appendRelayFailureFields(params,
+					zap.Int("consecutive_failures", consecutiveFailures),
+					zap.String("disable_rationale", "repeated 429 errors indicate persistent quota exhaustion; channel automatically disabled"),
+				)...,
+			)
+			monitor.DisableChannel(params.ChannelId, params.ChannelName,
+				fmt.Sprintf("rate limited after %d consecutive failures", consecutiveFailures))
+		}
+
 		monitor.Emit(params.ChannelId, false)
 		return
 	}
