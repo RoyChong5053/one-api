@@ -399,12 +399,12 @@ var (
 	ChannelTestFrequencyRaw = strings.TrimSpace(env.String("CHANNEL_TEST_FREQUENCY", ""))
 
 	// ChannelTestFrequency triggers automatic channel health probes when greater
-	// than zero. The value specifies seconds between probes.
+	// than zero. The value specifies minutes between probes.
 	//
 	// Environment variable: CHANNEL_TEST_FREQUENCY
 	// Default: 0 (disabled)
-	// Unit: seconds
-	// Example: 3600 (test every hour)
+	// Unit: minutes
+	// Example: 360 (test every 6 hours, recommended for free-tier channels)
 	ChannelTestFrequency = func() int {
 		if ChannelTestFrequencyRaw == "" {
 			return 0

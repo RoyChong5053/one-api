@@ -644,7 +644,7 @@ export function TokensPage() {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <ResponsivePageContainer
+      <ResponsivePageContainer maxWidth="full"
         title={tr('title', 'Tokens')}
         description={tr('description', 'Manage your API access tokens')}
         actions={

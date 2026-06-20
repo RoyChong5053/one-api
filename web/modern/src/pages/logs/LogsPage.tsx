@@ -677,7 +677,7 @@ export function LogsPage() {
   };
 
   return (
-    <ResponsivePageContainer
+    <ResponsivePageContainer maxWidth="full"
       title={t('logs.title')}
       description={t('logs.description')}
       actions={

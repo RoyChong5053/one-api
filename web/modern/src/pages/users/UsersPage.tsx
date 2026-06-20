@@ -520,7 +520,7 @@ export function UsersPage() {
   };
 
   return (
-    <ResponsivePageContainer title={tr('title', 'Users')} description={tr('description', 'Manage users')} actions={toolbarActions}>
+    <ResponsivePageContainer maxWidth="full" title={tr('title', 'Users')} description={tr('description', 'Manage users')} actions={toolbarActions}>
       <Card className="border-0 md:border shadow-none md:shadow-sm">
         <CardContent className={cn(isMobile ? 'p-2' : 'p-6')}>
           <EnhancedDataTable

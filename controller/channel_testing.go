@@ -506,8 +506,8 @@ func AutomaticallyTestChannels(frequency int) {
 
 	for {
 		time.Sleep(time.Duration(frequency) * time.Minute)
-		lg.Info("testing all channels")
-		_ = testChannels(ctx, false, "all")
+		lg.Info("testing auto-disabled channels")
+		_ = testChannels(ctx, false, "auto_disabled")
 		lg.Info("channel test finished")
 	}
 }
