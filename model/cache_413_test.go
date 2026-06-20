@@ -25,6 +25,6 @@ func TestCacheGetRandomSatisfiedChannelExcluding_413Filtering_NoCandidates(t *te
 	}
 	group2model2channels["default"]["gpt-3.5-turbo"] = []*Channel{} // explicitly empty
 
-	_, err := CacheGetRandomSatisfiedChannelExcluding("default", "gpt-3.5-turbo", false, map[int]bool{1: true}, true)
+	_, err := CacheGetRandomSatisfiedChannelExcluding("default", "gpt-3.5-turbo", false, map[int]bool{1: true}, nil, true)
 	require.Error(t, err)
 }

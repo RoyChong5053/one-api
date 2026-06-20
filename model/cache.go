@@ -704,7 +704,11 @@ func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPrior
 // CacheGetRandomSatisfiedChannelExcluding gets a random satisfied channel while excluding specified channel IDs.
 // It also skips channels in the in-memory suspension map and weights selection by health score within the same
 // priority tier.
-func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreFirstPriority bool, excludeChannelIds map[int]bool, tryLargerMaxTokens bool) (*Channel, error) {
+//
+// When excludedProviderTypes is non-empty, channels whose Type field appears in this map are
+// excluded from selection. If no candidates remain after provider filtering, the exclusion is
+// dropped and all remaining candidates are considered (fallback within same provider).
+func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreFirstPriority bool, excludeChannelIds map[int]bool, excludedProviderTypes map[int]bool, tryLargerMaxTokens bool) (*Channel, error) {
 	if !config.MemoryCacheEnabled {
 		return GetRandomSatisfiedChannelExcluding(group, model, ignoreFirstPriority, excludeChannelIds)
 	}
@@ -761,6 +765,25 @@ func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreF
 
 	if len(candidateChannels) == 0 {
 		return nil, errors.Errorf("no available channels support model %s after exclusions", model)
+	}
+
+	// NEW: Exclude channels belonging to failed provider types.
+	// If no candidates remain after provider filtering, fall back to all candidates.
+	if len(excludedProviderTypes) > 0 {
+		var providerFiltered []*Channel
+		for _, ch := range candidateChannels {
+			if !excludedProviderTypes[ch.Type] {
+				providerFiltered = append(providerFiltered, ch)
+			}
+		}
+		if len(providerFiltered) > 0 {
+			candidateChannels = providerFiltered
+		} else {
+			logger.Logger.Info("all providers excluded, falling back to same-provider channels",
+				zap.Int("excluded_providers", len(excludedProviderTypes)),
+				zap.Int("candidates_before_fallback", len(candidateChannels)),
+			)
+		}
 	}
 
 	// If ignoreFirstPriority is true, we want to select from lower priority channels

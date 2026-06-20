@@ -262,7 +262,7 @@ func Distribute() func(c *gin.Context) {
 				}
 
 				for {
-					candidate, err := model.CacheGetRandomSatisfiedChannelExcluding(userGroup, requestModel, ignoreFirstPriority, exclude, false)
+					candidate, err := model.CacheGetRandomSatisfiedChannelExcluding(userGroup, requestModel, ignoreFirstPriority, exclude, nil, false)
 					if err != nil {
 						return nil, errors.Wrap(err, "select channel from cache")
 					}

@@ -279,6 +279,12 @@ func Relay(c *gin.Context) {
 	// For 5xx/server transient errors, avoid reusing the same ability first, probe within tier
 	isServerTransient := bizErr.StatusCode >= 500 && bizErr.StatusCode <= 599
 
+	// Track failed provider types (channel.Type) so retries prefer different providers.
+	// This ensures that when one provider's channels are all rate-limited, we try
+	// channels from other providers before falling back to same-provider channels.
+	failedProviderTypes := make(map[int]bool)
+	failedProviderTypes[c.GetInt(ctxkey.Channel)] = true
+
 	for i := retryTimes; i > 0; i-- {
 		var channel *dbmodel.Channel
 		var err error
@@ -288,6 +294,7 @@ func Relay(c *gin.Context) {
 			lg.Info("Debug: Attempting retry",
 				zap.Int("retry_attempt", retryTimes-i+1),
 				zap.Ints("excluded_channels", getChannelIds(failedChannels)),
+				zap.Ints("excluded_providers", getProviderTypes(failedProviderTypes)),
 				zap.Bool("try_lower_priority_first", shouldTryLowerPriorityFirst),
 				zap.Bool("try_larger_max_tokens_first", shouldTryLargerMaxTokensFirst),
 				zap.Bool("server_transient", isServerTransient))
@@ -295,24 +302,28 @@ func Relay(c *gin.Context) {
 
 		if shouldTryLargerMaxTokensFirst {
 			// For 413 errors, try larger max_tokens channels
-			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, true)
+			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, nil, true)
 		} else if shouldTryLowerPriorityFirst {
-			// For 429 errors, first try lower priority channels while excluding failed ones
-			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, true, failedChannels, false)
+			// For 429 errors, prefer channels from different providers at lower priority.
+			// The excludedProviderTypes filter causes CacheGetRandomSatisfiedChannelExcluding
+			// to skip channels whose Type matches any failed provider, and falls back to
+			// same-provider channels if no other providers remain.
+			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, true, failedChannels, failedProviderTypes, false)
 			if err != nil {
-				// If no lower priority channels available, try highest priority channels (excluding failed ones)
+				// If no lower priority channels available (including provider-excluded),
+				// try highest priority channels without provider restriction
 				lg.Info("No lower priority channels available, trying highest priority channels",
 					zap.Ints("excluded_channels", getChannelIds(failedChannels)),
 				)
-				channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, false)
+				channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, nil, false)
 			}
 		} else {
 			// For non-429 errors, try highest priority first, then lower priority (excluding failed ones)
-			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, false)
+			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, nil, false)
 			if err != nil {
 				lg.Info("No highest priority channels available, trying lower priority channels",
 					zap.Ints("excluded_channels", getChannelIds(failedChannels)))
-				channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, true, failedChannels, false)
+				channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, true, failedChannels, nil, false)
 			}
 		}
 
@@ -379,6 +390,7 @@ func Relay(c *gin.Context) {
 		channelId = c.GetInt(ctxkey.ChannelId)
 		dbmodel.RecordChannelFailure(channelId)
 		failedChannels[channelId] = true // Track this failed channel
+		failedProviderTypes[c.GetInt(ctxkey.Channel)] = true // Track this failed provider
 		lastFailedChannelId = channelId
 
 		// Debug logging to track which channels are being added to failed list (only when debug is enabled)
@@ -634,6 +646,15 @@ func getChannelIds(failedChannels map[int]bool) []int {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// Helper function to get provider types from failed providers map for debugging
+func getProviderTypes(failedProviders map[int]bool) []int {
+	var types []int
+	for t := range failedProviders {
+		types = append(types, t)
+	}
+	return types
 }
 
 // Helper function to check and log database suspension status for debugging
