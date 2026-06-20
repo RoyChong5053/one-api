@@ -76,12 +76,12 @@ func channelSupportsGroup(channel *model.Channel, userGroup string) bool {
 // Parameters:
 //   - userGroup: caller's resolved group.
 //   - relayMode: resolved relay mode.
-//   - ignoreFirstPriority: whether to skip highest-priority tier.
+//   - preferLowestPriority: whether to select from the lowest priority tier.
 //
 // Returns:
 //   - *model.Channel: selected channel.
 //   - error: selection error when no channel matches.
-func selectResponseWebSocketChannelWithoutModel(userGroup string, relayMode int, ignoreFirstPriority bool) (*model.Channel, error) {
+func selectResponseWebSocketChannelWithoutModel(userGroup string, relayMode int, preferLowestPriority bool) (*model.Channel, error) {
 	channels, err := model.GetAllEnabledChannels()
 	if err != nil {
 		return nil, errors.Wrap(err, "list enabled channels")
@@ -131,7 +131,7 @@ func selectResponseWebSocketChannelWithoutModel(userGroup string, relayMode int,
 	})
 
 	highestPriority := candidates[0].GetPriority()
-	if ignoreFirstPriority {
+	if preferLowestPriority {
 		for _, candidate := range candidates {
 			if candidate.GetPriority() < highestPriority {
 				return candidate, nil
@@ -256,13 +256,13 @@ func Distribute() func(c *gin.Context) {
 				}
 			}
 
-			selectChannel := func(ignoreFirstPriority bool, exclude map[int]bool) (*model.Channel, error) {
+			selectChannel := func(preferLowestPriority bool, exclude map[int]bool) (*model.Channel, error) {
 				if requestModel == "" && isResponseWSHandshake {
-					return selectResponseWebSocketChannelWithoutModel(userGroup, relayMode, ignoreFirstPriority)
+					return selectResponseWebSocketChannelWithoutModel(userGroup, relayMode, preferLowestPriority)
 				}
 
 				for {
-					candidate, err := model.CacheGetRandomSatisfiedChannelExcluding(userGroup, requestModel, ignoreFirstPriority, exclude, nil, false)
+					candidate, err := model.CacheGetSatisfiedChannelExcluding(userGroup, requestModel, preferLowestPriority, exclude, nil, false)
 					if err != nil {
 						return nil, errors.Wrap(err, "select channel from cache")
 					}

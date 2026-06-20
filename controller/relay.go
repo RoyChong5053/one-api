@@ -302,28 +302,28 @@ func Relay(c *gin.Context) {
 
 		if shouldTryLargerMaxTokensFirst {
 			// For 413 errors, try larger max_tokens channels
-			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, nil, true)
+			channel, err = dbmodel.CacheGetSatisfiedChannelExcluding(group, originalModel, false, failedChannels, nil, true)
 		} else if shouldTryLowerPriorityFirst {
-			// For 429 errors, prefer channels from different providers at lower priority.
-			// The excludedProviderTypes filter causes CacheGetRandomSatisfiedChannelExcluding
-			// to skip channels whose Type matches any failed provider, and falls back to
-			// same-provider channels if no other providers remain.
-			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, true, failedChannels, failedProviderTypes, false)
+			// For 429 errors, prefer channels from different providers.
+			// Provider exclusion filters out failed provider types (channel.Type),
+			// then selects the highest-priority channel from remaining providers.
+			// If no candidates remain after provider exclusion, falls back without it.
+			channel, err = dbmodel.CacheGetSatisfiedChannelExcluding(group, originalModel, false, failedChannels, failedProviderTypes, false)
 			if err != nil {
-				// If no lower priority channels available (including provider-excluded),
-				// try highest priority channels without provider restriction
-				lg.Info("No lower priority channels available, trying highest priority channels",
+				// If no channels available with provider exclusion,
+				// try without provider restriction (same-provider fallback)
+				lg.Info("No different-provider channels available, trying same-provider channels",
 					zap.Ints("excluded_channels", getChannelIds(failedChannels)),
 				)
-				channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, nil, false)
+				channel, err = dbmodel.CacheGetSatisfiedChannelExcluding(group, originalModel, false, failedChannels, nil, false)
 			}
 		} else {
-			// For non-429 errors, try highest priority first, then lower priority (excluding failed ones)
-			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, nil, false)
+			// For non-429 errors, try highest priority first, then lowest priority (excluding failed ones)
+			channel, err = dbmodel.CacheGetSatisfiedChannelExcluding(group, originalModel, false, failedChannels, nil, false)
 			if err != nil {
-				lg.Info("No highest priority channels available, trying lower priority channels",
+				lg.Info("No highest priority channels available, trying lowest priority channels",
 					zap.Ints("excluded_channels", getChannelIds(failedChannels)))
-				channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, true, failedChannels, nil, false)
+				channel, err = dbmodel.CacheGetSatisfiedChannelExcluding(group, originalModel, true, failedChannels, nil, false)
 			}
 		}
 

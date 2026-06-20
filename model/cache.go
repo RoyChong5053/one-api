@@ -599,9 +599,9 @@ func FetchChannelsForModel(group, model string) ([]*Channel, error) {
 	return channels, nil
 }
 
-func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority bool) (*Channel, error) {
+func CacheGetSatisfiedChannel(group string, model string, preferLowestPriority bool) (*Channel, error) {
 	if !config.MemoryCacheEnabled {
-		return GetRandomSatisfiedChannel(group, model, ignoreFirstPriority)
+		return GetRandomSatisfiedChannel(group, model, preferLowestPriority)
 	}
 	channelSyncLock.RLock()
 	// It is important to make a copy if we are going to modify or iterate outside lock,
@@ -676,23 +676,23 @@ func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPrior
 	}
 
 	var idx int
-	if ignoreFirstPriority && endIdx < len(candidateChannels) {
+	if preferLowestPriority && endIdx < len(candidateChannels) {
 		idx = random.RandRange(endIdx, len(candidateChannels))
 	} else {
 		idx = rand.Intn(endIdx)
-		if ignoreFirstPriority {
+		if preferLowestPriority {
 			// All channels have the same highest priority, or only one priority level exists.
-			// If ignoreFirstPriority is true, and we only have one priority level,
-			// it means we cannot satisfy "ignoreFirstPriority".
+			// If preferLowestPriority is true, and we only have one priority level,
+			// it means we cannot satisfy preferLowestPriority.
 			// This case might indicate no lower-priority channels exist.
 			// Depending on desired behavior, could return error or pick from existing.
 			// For now, let's assume it means "pick any if only one priority level".
 			// If truly no other channel to pick, the random selection will pick from current set.
-			// This part of logic might need refinement based on precise meaning of ignoreFirstPriority
+			// This part of logic might need refinement based on precise meaning of preferLowestPriority
 			// when only one priority tier exists.
 			// The original code implies if endIdx == len(channels), it picks from 0 to endIdx-1.
 			// If endIdx < len(channels), it picks from endIdx to len(channels)-1.
-			// So if ignoreFirstPriority is true and all are same priority, it will still pick from them.
+			// So if preferLowestPriority is true and all are same priority, it will still pick from them.
 			// This seems okay.
 		}
 	}
@@ -701,16 +701,20 @@ func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPrior
 	return channel, nil
 }
 
-// CacheGetRandomSatisfiedChannelExcluding gets a random satisfied channel while excluding specified channel IDs.
-// It also skips channels in the in-memory suspension map and weights selection by health score within the same
-// priority tier.
+// CacheGetSatisfiedChannelExcluding selects a channel by strict priority ordering
+// while excluding specified channel IDs and provider types.
+//
+// Priority is the primary sort key: the highest-priority tier is always selected first.
+// Within the same priority tier, health-weighted selection picks the healthiest channel.
 //
 // When excludedProviderTypes is non-empty, channels whose Type field appears in this map are
 // excluded from selection. If no candidates remain after provider filtering, the exclusion is
 // dropped and all remaining candidates are considered (fallback within same provider).
-func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreFirstPriority bool, excludeChannelIds map[int]bool, excludedProviderTypes map[int]bool, tryLargerMaxTokens bool) (*Channel, error) {
+//
+// preferLowestPriority=true inverts the selection to pick from the lowest priority tier instead.
+func CacheGetSatisfiedChannelExcluding(group string, model string, preferLowestPriority bool, excludeChannelIds map[int]bool, excludedProviderTypes map[int]bool, tryLargerMaxTokens bool) (*Channel, error) {
 	if !config.MemoryCacheEnabled {
-		return GetRandomSatisfiedChannelExcluding(group, model, ignoreFirstPriority, excludeChannelIds)
+		return GetRandomSatisfiedChannelExcluding(group, model, preferLowestPriority, excludeChannelIds)
 	}
 
 	removeExpiredSuspensions()
@@ -786,9 +790,10 @@ func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreF
 		}
 	}
 
-	// If ignoreFirstPriority is true, we want to select from lower priority channels
-	// If ignoreFirstPriority is false, we want to select from highest priority channels
-	if ignoreFirstPriority {
+	// When preferLowestPriority is true, select from the lowest priority tier.
+	// When preferLowestPriority is false, select from the highest priority tier.
+	// Priority is always the primary sort key — selection never crosses tiers randomly.
+	if preferLowestPriority {
 		// Find the boundary where highest priority channels end
 		endIdx := len(candidateChannels)
 		firstChannel := candidateChannels[0]
@@ -804,7 +809,7 @@ func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreF
 		// If there are lower priority channels available, select from them
 		if endIdx < len(candidateChannels) {
 			channel := selectByHealthWeight(candidateChannels[endIdx:], model)
-			logger.Logger.Info("select channel in cache (lower priority, health-weighted)", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
+			logger.Logger.Debug("select channel in cache (lowest priority, health-weighted)", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
 			return channel, nil
 		} else {
 			// No lower priority channels available, return error to indicate we should try a different approach
@@ -839,7 +844,7 @@ func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreF
 		}
 
 		channel := selectByHealthWeight(maxPriorityChannels, model)
-		logger.Logger.Info("select channel in cache (highest priority, health-weighted)", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
+		logger.Logger.Debug("select channel in cache (highest priority, health-weighted)", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
 		return channel, nil
 	}
 }

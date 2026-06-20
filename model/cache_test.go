@@ -8,7 +8,7 @@ import (
 	"github.com/Laisky/one-api/common/config"
 )
 
-func TestCacheGetRandomSatisfiedChannelExcluding(t *testing.T) {
+func TestCacheGetSatisfiedChannelExcluding(t *testing.T) {
 	// Enable memory cache for this test
 	originalMemoryCacheEnabled := config.MemoryCacheEnabled
 	config.MemoryCacheEnabled = true
@@ -38,7 +38,7 @@ func TestCacheGetRandomSatisfiedChannelExcluding(t *testing.T) {
 	tests := []struct {
 		name                string
 		excludeChannelIds   map[int]bool
-		ignoreFirstPriority bool
+		preferLowestPriority bool
 		expectedChannelIds  []int // Possible channel IDs that could be returned
 		shouldError         bool
 		tryLargerMaxTokens  bool
@@ -46,15 +46,15 @@ func TestCacheGetRandomSatisfiedChannelExcluding(t *testing.T) {
 		{
 			name:                "No exclusions, highest priority",
 			excludeChannelIds:   map[int]bool{},
-			ignoreFirstPriority: false,
+			preferLowestPriority: false,
 			expectedChannelIds:  []int{1, 2}, // Should only return high priority channels
 			shouldError:         false,
 			tryLargerMaxTokens:  true,
 		},
 		{
-			name:                "No exclusions, lower priority",
+			name:                "No exclusions, lowest priority",
 			excludeChannelIds:   map[int]bool{},
-			ignoreFirstPriority: true,
+			preferLowestPriority: true,
 			expectedChannelIds:  []int{3, 4}, // Should only return low priority channels
 			shouldError:         false,
 			tryLargerMaxTokens:  true,
@@ -62,7 +62,7 @@ func TestCacheGetRandomSatisfiedChannelExcluding(t *testing.T) {
 		{
 			name:                "Exclude one high priority channel",
 			excludeChannelIds:   map[int]bool{1: true},
-			ignoreFirstPriority: false,
+			preferLowestPriority: false,
 			expectedChannelIds:  []int{2}, // Should return the remaining high priority channel
 			shouldError:         false,
 			tryLargerMaxTokens:  true,
@@ -70,7 +70,7 @@ func TestCacheGetRandomSatisfiedChannelExcluding(t *testing.T) {
 		{
 			name:                "Exclude all high priority channels",
 			excludeChannelIds:   map[int]bool{1: true, 2: true},
-			ignoreFirstPriority: false,
+			preferLowestPriority: false,
 			expectedChannelIds:  []int{3, 4}, // Should fallback to next highest available priority (low priority channels)
 			shouldError:         false,
 			tryLargerMaxTokens:  true,
@@ -78,7 +78,7 @@ func TestCacheGetRandomSatisfiedChannelExcluding(t *testing.T) {
 		{
 			name:                "Exclude one low priority channel",
 			excludeChannelIds:   map[int]bool{3: true},
-			ignoreFirstPriority: true,
+			preferLowestPriority: true,
 			expectedChannelIds:  []int{4}, // Should return the remaining low priority channel
 			shouldError:         false,
 			tryLargerMaxTokens:  true,
@@ -86,7 +86,7 @@ func TestCacheGetRandomSatisfiedChannelExcluding(t *testing.T) {
 		{
 			name:                "Exclude all channels",
 			excludeChannelIds:   map[int]bool{1: true, 2: true, 3: true, 4: true},
-			ignoreFirstPriority: false,
+			preferLowestPriority: false,
 			expectedChannelIds:  []int{}, // Should return error as no channels available
 			shouldError:         true,
 			tryLargerMaxTokens:  true,
@@ -95,7 +95,7 @@ func TestCacheGetRandomSatisfiedChannelExcluding(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			channel, err := CacheGetRandomSatisfiedChannelExcluding(testGroup, testModel, tt.ignoreFirstPriority, tt.excludeChannelIds, nil, tt.tryLargerMaxTokens)
+			channel, err := CacheGetSatisfiedChannelExcluding(testGroup, testModel, tt.preferLowestPriority, tt.excludeChannelIds, nil, tt.tryLargerMaxTokens)
 
 			if tt.shouldError {
 				assert.Error(t, err)
