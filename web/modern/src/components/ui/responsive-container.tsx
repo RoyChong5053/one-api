@@ -46,7 +46,7 @@ export function ResponsiveContainer({
 
   return (
     <div
-      className={cn('w-full max-w-[100vw]', !fluid && maxWidthClasses[maxWidth], center && 'mx-auto', paddingClasses[padding], className)}
+      className={cn('w-full', !fluid && maxWidthClasses[maxWidth], center && 'mx-auto', paddingClasses[padding], className)}
     >
       {children}
     </div>
