@@ -58,18 +58,35 @@ func buildTestRequest(model string) *relaymodel.GeneralOpenAIRequest {
 
 func parseTestResponse(resp string) (*openai.TextResponse, string, error) {
 	var response openai.TextResponse
-	err := json.Unmarshal([]byte(resp), &response)
-	if err != nil {
+	if err := json.Unmarshal([]byte(resp), &response); err != nil {
 		return nil, "", errors.Wrap(err, "unmarshal test response")
 	}
 	if len(response.Choices) == 0 {
 		return nil, "", errors.New("response has no choices")
 	}
-	stringContent, ok := response.Choices[0].Content.(string)
-	if !ok {
-		return nil, "", errors.New("response content is not string")
+
+	content := response.Choices[0].Content
+	switch v := content.(type) {
+	case string:
+		return &response, v, nil
+	case []interface{}:
+		var parts []string
+		for _, item := range v {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			typ, _ := m["type"].(string)
+			if typ == "text" {
+				if txt, ok := m["text"].(string); ok {
+					parts = append(parts, txt)
+				}
+			}
+		}
+		return &response, strings.Join(parts, "\n"), nil
+	default:
+		return nil, "", errors.New("response content is not string or array")
 	}
-	return &response, stringContent, nil
 }
 
 // calculateTestCost calculates the actual cost that would have been charged for a test request
