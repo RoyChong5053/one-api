@@ -22,34 +22,37 @@ done
 
 # ── 颜色 ──────────────────────────────────────────────
 GRN='\033[0;32m'; RED='\033[0;31m'; YLW='\033[0;33m'
-CYN='\033[0;36m'; BLU='\033[0;34m'; RST='\033[0;33m'; CLR='\033[0m'
+CYN='\033[0;36m'; BLU='\033[0;34m'; CLR='\033[0m'
 
 # ── 追踪指定 request_id ────────────────────────────────
-trace_request() {
-  local rid="$1"
+if [ "$MODE" = "trace" ]; then
   echo -e "${CYN}══════════════════════════════════════════${CLR}"
-  echo -e "${CYN}  Full Trace: $rid${CLR}"
+  echo -e "${CYN}  Full Trace: $REQUEST_ID${CLR}"
   echo -e "${CYN}══════════════════════════════════════════${CLR}"
   sudo journalctl -u one-api --no-pager -n 50000 2>/dev/null \
-    | rg -F "$rid" \
+    | rg -F "$REQUEST_ID" \
     | python3 -c "
 import sys, re, json
 
-def extract_json(line):
-    idx = line.rfind('{')
-    if idx < 0: return {}, line
+def parse_line(line):
+    json_start = line.rfind('{')
+    if json_start < 0: return '', '', {}
+    prefix = line[:json_start].rstrip()
     try:
-        return json.loads(line[idx:]), line[:idx].rstrip()
+        data = json.loads(line[json_start:])
     except:
-        return {}, line
+        data = {}
+    ts_match = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})', prefix)
+    ts = ts_match.group(1) if ts_match else ''
+    msg_match = re.search(r'\.go:\d+\s+(.+)$', prefix)
+    msg = msg_match.group(1).strip() if msg_match else prefix.split()[-1] if prefix else ''
+    return ts, msg, data
 
 for line in sys.stdin:
     line = line.rstrip()
     if not line: continue
-    data, prefix = extract_json(line)
+    ts, msg, data = parse_line(line)
 
-    ts = data.get('timestamp', '') or ''
-    msg = data.get('msg', '') or ''
     ch = data.get('channel_id', '') or ''
     ch_name = data.get('channel_name', '') or ''
     status = data.get('status_code', '') or ''
@@ -60,20 +63,17 @@ for line in sys.stdin:
     model = data.get('origin_model', '') or data.get('actual_model', '') or data.get('model', '') or ''
     url = data.get('url', '') or ''
     remaining = data.get('remaining_attempts', '') or ''
-    frm = data.get('from', '') or ''
-    to = data.get('to', '') or ''
 
     ts_short = ts[11:19] if len(ts) > 19 else ts
     head = f'[{ts_short}]'
 
-    # ← 着色
     if 'using channel to retry' in msg:
-        head += ' ' + ('\033[0;36mRETRY\033[0m' if remaining else 'RETRY')
-        head += f'  → ch{ch} ({ch_name})  remaining={remaining}'
+        head += ' \033[0;36mRETRY\033[0m'
+        head += f'  -> ch{ch} ({ch_name})  remaining={remaining}'
         print(head)
     elif 'relay error' in msg:
-        head += ' ' + ('\033[0;31mERROR\033[0m')
-        err_part = f'  \033[0;31m✗ ch{ch} ({ch_name})\033[0m  status={status}'
+        head += ' \033[0;31mERROR\033[0m'
+        err_part = f'  \033[0;31mX ch{ch} ({ch_name})\033[0m  status={status}'
         if err_code: err_part += f'  err_code={err_code}'
         if error_type: err_part += f'  type={error_type}'
         print(head + err_part)
@@ -81,27 +81,23 @@ for line in sys.stdin:
             short_up = upstream[:200]
             print(f'     upstream: {short_up}')
     elif 'Channel changed during retry' in msg:
-        print(f'{head}  \033[0;33mSWITCH\033[0m  ch{frm} → ch{to}')
+        frm = data.get('from', '') or ''
+        to = data.get('to', '') or ''
+        print(f'{head}  \033[0;33mSWITCH\033[0m  ch{frm} -> ch{to}')
     elif 'using channel' in msg and ch:
-        print(f'{head}  \033[0;32mDIST\033[0m    → ch{ch} ({ch_name})  model={model}')
+        print(f'{head}  \033[0;32mDIST\033[0m    -> ch{ch} ({ch_name})  model={model}')
     elif '/v1/chat/completions' in url and 'POST' in msg:
-        sc = data.get('status_code', '')
+        sc = data.get('status_code', '') or ''
         if sc == '200':
             print(f'{head}  \033[0;32mDONE\033[0m    {sc}  cost={cost}')
         else:
             print(f'{head}  \033[0;31mDONE\033[0m    {sc}  cost={cost}')
-    else:
-        # 其他相关但不太重要的行
-        if 'suspension_duration' in line or 'ability suspended' in line:
-            print(f'{head}  {msg}')
-            if ch: print(f'     channel_id={ch}')
+    elif 'ability suspended' in msg or 'suspension_duration' in msg:
+        print(f'{head}  SUSPEND {msg}')
+        if ch: print(f'     channel_id={ch}')
 " 2>/dev/null
   echo ""
   exit 0
-}
-
-if [ "$MODE" = "trace" ]; then
-  trace_request "$REQUEST_ID"
 fi
 
 # ── 实时跟踪 ──────────────────────────────────────────
@@ -114,56 +110,54 @@ from collections import OrderedDict
 
 buf = OrderedDict()
 
-def extract_json(line):
-    idx = line.rfind('{')
-    if idx < 0: return {}, line
+def parse_line(line):
+    json_start = line.rfind('{')
+    if json_start < 0: return '', '', {}
+    prefix = line[:json_start].rstrip()
     try:
-        return json.loads(line[idx:]), line[:idx].rstrip()
+        data = json.loads(line[json_start:])
     except:
-        return {}, line
+        data = {}
+    ts_match = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})', prefix)
+    ts = ts_match.group(1) if ts_match else ''
+    msg_match = re.search(r'\.go:\d+\s+(.+)$', prefix)
+    msg = msg_match.group(1).strip() if msg_match else prefix.split()[-1] if prefix else ''
+    return ts, msg, data
 
 for line in sys.stdin:
     line = line.rstrip()
     if not line: continue
-    data, prefix = extract_json(line)
+    ts, msg, data = parse_line(line)
     rid = data.get('request_id', '')
     if not rid: continue
-    msg = data.get('msg', '') or ''
+
+    if rid not in buf:
+        buf[rid] = {'model': '', 'time': ts, 'channels': OrderedDict(), 'retries': 0}
+    r = buf[rid]
+    while len(buf) > 200:
+        buf.popitem(last=False)
+
     ch = data.get('channel_id', '') or ''
     ch_name = data.get('channel_name', '') or ''
     status = data.get('status_code', '') or ''
     upstream = data.get('upstream_error', '') or ''
-    ts = data.get('timestamp', '')
-    model = data.get('origin_model', '') or data.get('model', '') or ''
     cost = data.get('cost', '') or ''
     url = data.get('url', '') or ''
+    model = data.get('origin_model', '') or data.get('model', '') or ''
+    remaining = data.get('remaining_attempts', '') or ''
 
-    if rid not in buf:
-        buf[rid] = {'model': model, 'time': ts, 'channels': OrderedDict(), 'retries': 0, 'final': ''}
+    if model and not r['model']: r['model'] = model
 
-    r = buf[rid]
-
-    # 检查缓冲是否过多，清理旧的
-    while len(buf) > 200:
-        buf.popitem(last=False)
-
-    # 打印新事件
     ts_short = ts[11:19] if len(ts) > 19 else ''
 
     if 'using channel to retry' in msg and ch:
         r['retries'] += 1
         if ch not in r['channels']:
-            r['channels'][ch] = {'name': ch_name, 'status': 'RETRY', 'error': ''}
-        r['channels'][ch]['status'] = 'RETRY'
-        remaining = data.get('remaining_attempts', '') or ''
-        print(f'\033[0;36m[{ts_short}]\033[0m \033[0;33mRETRY\033[0m  rid={rid[-12:]}  → ch{ch}({ch_name})  remain={remaining}')
+            r['channels'][ch] = {'name': ch_name}
+        print(f'\033[0;36m[{ts_short}]\033[0m \033[0;33mRETRY\033[0m  rid={rid[-12:]}  -> ch{ch}({ch_name})  remain={remaining}')
 
     elif 'relay error' in msg and ch:
         err_code = data.get('error_code', '') or ''
-        if ch not in r['channels']:
-            r['channels'][ch] = {'name': ch_name, 'status': 'ERROR', 'error': err_code}
-        r['channels'][ch]['status'] = 'ERROR'
-        r['channels'][ch]['error'] = err_code
         short_up = upstream[:150] if upstream else ''
         print(f'\033[0;31m[{ts_short}]\033[0m \033[0;31mERROR\033[0m  rid={rid[-12:]}  ch{ch}({ch_name})  {err_code}')
         if short_up:
@@ -171,19 +165,17 @@ for line in sys.stdin:
 
     elif 'using channel' in msg and ch and 'retry' not in msg:
         if ch not in r['channels']:
-            r['channels'][ch] = {'name': ch_name, 'status': 'DIST', 'error': ''}
-        print(f'\033[0;32m[{ts_short}]\033[0m \033[0;32mDIST\033[0m   rid={rid[-12:]}  → ch{ch}({ch_name})  model={r[\"model\"]}')
+            r['channels'][ch] = {'name': ch_name}
+        print(f'\033[0;32m[{ts_short}]\033[0m \033[0;32mDIST\033[0m   rid={rid[-12:]}  -> ch{ch}({ch_name})  model={r[\"model\"]}')
 
     elif '/v1/chat/completions' in url and 'POST' in msg:
         sc = data.get('status_code', '') or ''
-        r['final'] = sc
         if sc == '200':
             sc_color = '\033[0;32m'
         else:
             sc_color = '\033[0;31m'
-        chain = '→'.join(r['channels'].keys()) if r['channels'] else '?'
+        chain = '->'.join(r['channels'].keys()) if r['channels'] else '?'
         print(f'{sc_color}[{ts_short}]\033[0m \033[1mDONE\033[0m   rid={rid[-12:]}  {sc_color}{sc}\033[0m  cost={cost}  chain=[{chain}]  ({r[\"retries\"]} retries)')
-        # 清理已完成的请求
         del buf[rid]
 " 2>/dev/null
   exit 0
@@ -198,27 +190,33 @@ sudo journalctl -u one-api --no-pager -n "$LINES" 2>/dev/null \
 import sys, re, json
 from collections import OrderedDict
 
-def extract_json(line):
-    idx = line.rfind('{')
-    if idx < 0: return {}, line
+def parse_line(line):
+    json_start = line.rfind('{')
+    if json_start < 0: return '', '', {}
+    prefix = line[:json_start].rstrip()
     try:
-        return json.loads(line[idx:]), line[:idx].rstrip()
+        data = json.loads(line[json_start:])
     except:
-        return {}, line
+        data = {}
+    ts_match = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})', prefix)
+    ts = ts_match.group(1) if ts_match else ''
+    msg_match = re.search(r'\.go:\d+\s+(.+)$', prefix)
+    msg = msg_match.group(1).strip() if msg_match else ''
+    return ts, msg, data
 
 requests = OrderedDict()
 
 for line in sys.stdin:
     line = line.rstrip()
     if not line: continue
-    data, prefix = extract_json(line)
+    ts, msg, data = parse_line(line)
     rid = data.get('request_id', '')
     if not rid: continue
 
     if rid not in requests:
         requests[rid] = {
             'model': '',
-            'time': '',
+            'time': ts,
             'final_status': '',
             'final_cost': '',
             'channels': OrderedDict(),
@@ -226,13 +224,8 @@ for line in sys.stdin:
         }
     r = requests[rid]
 
-    ts = data.get('timestamp', '') or ''
-    if ts and not r['time']: r['time'] = ts
-
     model = data.get('origin_model', '') or data.get('model', '') or ''
     if model and not r['model']: r['model'] = model
-
-    msg = data.get('msg', '') or ''
     ch = str(data.get('channel_id', ''))
     ch_name = data.get('channel_name', '') or ''
     status = data.get('status_code', '') or ''
@@ -262,7 +255,7 @@ for line in sys.stdin:
             r['channels'][ch]['status'] = status
             r['channels'][ch]['name'] = ch_name or r['channels'][ch].get('name', '')
 
-    # 最终状态
+    # 最终状态 (gin access log)
     if '/v1/chat/completions' in url and 'POST' in msg:
         if status: r['final_status'] = status
         if cost: r['final_cost'] = cost
@@ -274,7 +267,6 @@ for rid, r in list(requests.items())[-60:]:
 
     print(f\"\\033[0;34m[{t}]\\033[0m \\033[1m{model}\\033[0m  rid={rid[-12:]}\")
 
-    # 每个 channel 一行
     for ch_id, info in r['channels'].items():
         name = info['name']
         ev = info['event']
@@ -283,13 +275,13 @@ for rid, r in list(requests.items())[-60:]:
         up = info['upstream']
 
         if st == '200' or (not st and ev == 'OK'):
-            marker = '✓'
+            marker = 'v'
             color = '\033[0;32m'
         elif st and st[0] in ('4', '5'):
-            marker = '✗'
+            marker = 'x'
             color = '\033[0;31m'
         else:
-            marker = '→'
+            marker = '>'
             color = '\033[0;33m'
 
         name_part = f' ({name})' if name else ''
@@ -297,15 +289,14 @@ for rid, r in list(requests.items())[-60:]:
         up_part = f' \"{up[:120]}\"' if up else ''
         print(f'  {color}{marker} ch{ch_id}{name_part} {ev}{err_part}{up_part}\\033[0m')
 
-    # 最终结果
     fs = r['final_status']
     fc = r['final_cost'] or '?'
     if fs == '200':
         fcolor = '\033[0;32m'
-        fmark = '✓'
+        fmark = 'v'
     elif fs and fs[0] in ('4', '5'):
         fcolor = '\033[0;31m'
-        fmark = '✗'
+        fmark = 'x'
     else:
         fcolor = '\033[0;33m'
         fmark = '?'
