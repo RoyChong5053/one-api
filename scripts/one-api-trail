@@ -16,15 +16,14 @@ while getopts "fr:n:" opt; do
     f) MODE="follow" ;;
     r) REQUEST_ID="$OPTARG"; MODE="trace" ;;
     n) LINES="$OPTARG" ;;
-    *) echo "用法: $0 [-f] [-r request_id] [-n lines]"; exit 1 ;;
+    *) echo "Usage: $0 [-f] [-r request_id] [-n lines]"; exit 1 ;;
   esac
 done
 
-# ── 追踪指定 request_id ────────────────────────────────
 if [ "$MODE" = "trace" ]; then
-  echo -e "\033[0;36m══════════════════════════════════════════\033[0m"
-  echo -e "\033[0;36m  Full Trace: $REQUEST_ID\033[0m"
-  echo -e "\033[0;36m══════════════════════════════════════════\033[0m"
+  echo -e "\033[0;36m================================"
+  echo "  Full Trace: $REQUEST_ID"
+  echo -e "================================\033[0m"
   sudo journalctl -u one-api --no-pager -n 50000 2>/dev/null \
     | rg -F "$REQUEST_ID" \
     | python3 -c '
@@ -52,7 +51,6 @@ for line in sys.stdin:
     err_code = data.get("error_code","") or ""
     upstream = data.get("upstream_error","") or ""
     cost = data.get("cost","") or ""
-    model = data.get("origin_model","") or data.get("actual_model","") or data.get("model","") or ""
     url = data.get("url","") or ""
 
     ts_short = ts[11:19] if len(ts) > 19 else ts
@@ -62,32 +60,29 @@ for line in sys.stdin:
         remaining = data.get("remaining_attempts","") or ""
         print("%s \033[0;36mRETRY\033[0m  -> ch%s (%s)  remain=%s" % (head, ch, ch_name, remaining))
     elif "relay error" in msg:
-        head += " \033[0;31mERROR\033[0m"
-        err_part = "  \033[0;31mX ch%s (%s)\033[0m  status=%s" % (ch, ch_name, status)
-        if err_code: err_part += "  err_code=%s" % err_code
-        print(head + err_part)
-        if upstream:
-            print("     upstream: %s" % upstream[:200])
+        print("%s \033[0;31mERROR\033[0m  ch%s (%s)  status=%s%s" % (
+            head, ch, ch_name, status,
+            "  err_code=%s" % err_code if err_code else ""))
+        if upstream: print("     upstream: %s" % upstream[:200])
     elif "Channel changed during retry" in msg:
         frm = data.get("from","") or ""
         to = data.get("to","") or ""
         print("%s  \033[0;33mSWITCH\033[0m  ch%s -> ch%s" % (head, frm, to))
-    elif "using channel" in msg and ch and "retry" not in msg:
-        print("%s  \033[0;32mDIST\033[0m    -> ch%s (%s)  model=%s" % (head, ch, ch_name, model))
-    elif "/v1/chat/completions" in url:
-        sc = data.get("status_code","") or ""
-        sc_color = "\033[0;32m" if sc == "200" else "\033[0;31m"
-        print("%s  %sDONE\033[0m    %s  cost=%s" % (head, sc_color, sc, cost))
     elif "record log" in msg:
         quota = data.get("quota","") or ""
-        tokens = "%s/%s" % (data.get("prompt_tokens","?"), data.get("completion_tokens","?"))
-        print("%s  LOG     quota=%s  tokens=%s" % (head, quota, tokens))
+        tokens_pt = data.get("prompt_tokens","") or ""
+        tokens_ct = data.get("completion_tokens","") or ""
+        print("%s  LOG  quota=%s  tokens=%s/%s" % (head, quota, tokens_pt, tokens_ct))
     elif "ability suspended" in msg or "suspension_duration" in msg:
         print("%s  SUSPEND %s" % (head, msg))
-        if ch: print("     channel_id=%s" % ch)
+        if ch: print("       ch=%s" % ch)
+    elif any(kw in msg for kw in ["relay retry skipped", "relay aborted by client",
+                                   "internal adaptor error", "relay retry channel selection failed"]):
+        print("%s  \033[0;31mFAIL\033[0m   ch%s (%s)  status=%s  %s" % (head, ch, ch_name, status, msg[:50]))
     else:
-        # 也输出其他相关事件
-        print("%s  %s" % (head, msg[:60]))
+        # 打印有 channel_id 的其他事件
+        if ch:
+            print("%s  %s  ch=%s" % (head, msg[:50], ch))
 ' 2>/dev/null
   echo ""
   exit 0
@@ -100,6 +95,7 @@ if [ "$MODE" = "follow" ]; then
     | python3 -c '
 import sys, re, json
 from collections import OrderedDict
+
 buf = OrderedDict()
 
 def parse_line(line):
@@ -124,7 +120,7 @@ for line in sys.stdin:
     if not key: continue
 
     if key not in buf:
-        buf[key] = {"trace_id": tid, "request_id": rid, "time": ts, "model": "", "channels": [], "retries": 0}
+        buf[key] = {"trace_id": tid, "request_id": rid, "time": ts}
     r = buf[key]
     while len(buf) > 200:
         buf.popitem(last=False)
@@ -135,42 +131,30 @@ for line in sys.stdin:
     upstream = data.get("upstream_error","") or ""
     cost = data.get("cost","") or ""
     url = data.get("url","") or ""
-    model = data.get("origin_model","") or data.get("model","") or ""
 
     if rid and not r["request_id"]: r["request_id"] = rid
     if tid and not r["trace_id"]: r["trace_id"] = tid
-    if model and not r["model"]: r["model"] = model
 
     ts_short = ts[11:19] if len(ts) > 19 else ""
 
     if "using channel to retry" in msg and ch:
-        r["retries"] += 1
-        r["channels"].append((ch, ch_name, "RETRY"))
         remaining = data.get("remaining_attempts","") or ""
-        print("\033[0;36m[%s]\033[0m \033[0;33mRETRY\033[0m  -> ch%s(%s)  remain=%s  key=%s" % (ts_short, ch, ch_name, remaining, key[-12:]))
+        print("\033[0;36m[%s]\033[0m \033[0;33mRETRY\033[0m  -> ch%s(%s)  remain=%s" % (ts_short, ch, ch_name, remaining))
 
     elif "relay error" in msg and ch:
         err_code = data.get("error_code","") or ""
-        r["channels"].append((ch, ch_name, "ERR"))
-        short_up = upstream[:150] if upstream else ""
-        print("\033[0;31m[%s]\033[0m \033[0;31mERROR\033[0m  ch%s(%s)  %s  key=%s" % (ts_short, ch, ch_name, err_code, key[-12:]))
-        if short_up:
-            print("  %s" % short_up)
-
-    elif "using channel" in msg and ch and "retry" not in msg:
-        r["channels"].append((ch, ch_name, "DIST"))
-
-    elif "record log" in msg:
-        pass  # 不打印 record log
+        print("\033[0;31m[%s]\033[0m \033[0;31mERROR\033[0m  ch%s(%s)  %s" % (ts_short, ch, ch_name, err_code))
+        if upstream:
+            print("  %s" % upstream[:150])
 
     elif "/v1/chat/completions" in url:
-        sc = data.get("status_code","") or ""
-        sc_color = "\033[0;32m" if sc == "200" else "\033[0;31m"
-        chain = "->".join([c[0] for c in r["channels"]]) if r["channels"] else "?"
-        model_display = r["model"][:20] if r["model"] else "?"
-        print("%s\033[1mDONE\033[0m   %s%s\033[0m  cost=%s  model=%s  [%s]  (%d retries)  key=%s" % (
-            sc_color, sc_color, sc, cost, model_display, chain, r["retries"], key[-12:]))
-        del buf[key]
+        # Gin access log: msg like "200 POST"
+        if "POST" in msg:
+            status_from_msg = msg.split()[0] if msg else ""
+            if status_from_msg == "200":
+                print("\033[0;32m[%s]\033[0m \033[1mDONE\033[0m   %s  cost=%s" % (ts_short, status_from_msg, cost))
+            else:
+                print("\033[0;31m[%s]\033[0m \033[1mDONE\033[0m   %s  cost=%s" % (ts_short, status_from_msg, cost))
 ' 2>/dev/null
   exit 0
 fi
@@ -196,7 +180,6 @@ def parse_line(line):
     msg = msg_match.group(1).strip() if msg_match else ""
     return ts, msg, data
 
-# 第一遍: 收集所有 trace 的事件
 traces = OrderedDict()
 
 for line in sys.stdin:
@@ -210,9 +193,9 @@ for line in sys.stdin:
 
     if key not in traces:
         traces[key] = {
-            "trace_id": tid, "request_id": rid, "time": ts, "model": "",
-            "channels": OrderedDict(), "retries": 0, "final_status": "",
-            "final_cost": "", "has_retry": False,
+            "trace_id": tid, "request_id": rid, "time": ts,
+            "model": "", "channels": OrderedDict(),
+            "retries": 0, "final_status": "", "final_cost": "",
         }
     r = traces[key]
 
@@ -221,8 +204,6 @@ for line in sys.stdin:
     model = data.get("origin_model","") or data.get("model","") or ""
     if model and not r["model"]: r["model"] = model
     url = data.get("url","") or ""
-
-    # 只看 POST /v1/chat/completions 的 API 调用（跳过 GET 页面请求）
     ch = str(data.get("channel_id","")) or ""
     ch_name = data.get("channel_name","") or ""
     status = str(data.get("status_code","")) or ""
@@ -230,61 +211,70 @@ for line in sys.stdin:
     upstream = data.get("upstream_error","") or ""
     cost = data.get("cost","") or ""
 
-    is_api_call = ("/v1/chat/completions" in url) or ("using channel" in msg) or ("relay error" in msg) or ("record log" in msg)
+    # ======== 收集 channel 事件 ========
 
-    if not is_api_call and not ch:
-        continue
-
-    # 记录 channel 事件
+    # retry 选中
     if "using channel to retry" in msg and ch:
         if ch not in r["channels"]:
-            r["channels"][ch] = {"name": ch_name, "err": "", "upstream": "", "event": "RETRY", "status": ""}
+            r["channels"][ch] = {"name": ch_name, "err": "", "upstream": "", "status": "", "event": "RETRY"}
         else:
             r["channels"][ch]["event"] = "RETRY"
-        r["has_retry"] = True
         r["retries"] += 1
 
-    elif "relay error" in msg and ch:
+    # 各种 channel 错误
+    is_channel_error = any(kw in msg for kw in [
+        "relay error", "relay retry skipped", "relay aborted by client",
+        "internal adaptor error", "relay retry channel selection failed",
+        "client request error",
+    ])
+    if ch and is_channel_error:
         if ch not in r["channels"]:
-            r["channels"][ch] = {"name": ch_name, "err": err_code, "upstream": upstream[:200], "event": "ERROR", "status": status}
+            r["channels"][ch] = {"name": ch_name, "err": err_code, "upstream": upstream[:200],
+                                 "status": status, "event": "ERROR"}
         else:
             r["channels"][ch]["err"] = err_code
             r["channels"][ch]["upstream"] = upstream[:200]
             r["channels"][ch]["status"] = status
-        # 也从 relay error 获取 channel name（retry 事件没有 name）
+            r["channels"][ch]["event"] = "ERROR"
         if ch_name:
             r["channels"][ch]["name"] = ch_name
 
-    elif "using channel" in msg and ch and "retry" not in msg:
+    # 初始分配 (只有 DEBUG=true 时才有)
+    if "using channel" in msg and ch and "retry" not in msg:
         if ch not in r["channels"]:
             r["channels"][ch] = {"name": ch_name, "err": "", "upstream": "", "event": "DIST", "status": ""}
 
-    elif "/v1/chat/completions" in url:
-        if status: r["final_status"] = status
-        if cost: r["final_cost"] = cost
+    # ======== 最终状态 ========
 
-    elif "record log" in msg:
-        if not r["final_cost"] and cost:
+    # Gin access log: msg 格式 "200 POST", 从中取状态码
+    if "/v1/chat/completions" in url and "POST" in msg:
+        status_from_msg = msg.split()[0] if msg else ""
+        if status_from_msg:
+            r["final_status"] = status_from_msg
+        if cost:
             r["final_cost"] = cost
 
-# 输出: 只看有 API 调用行为的 trace（有 model 或 channel 事件或 record log）
+    # record log 补充 cost (有时 gin log 没有 cost)
+    if "record log" in msg and cost and not r["final_cost"]:
+        r["final_cost"] = cost
+
+# ── 输出 ─────────────────────────────────
 count = 0
 for key, r in list(traces.items())[-80:]:
-    if not r["channels"] and not r["model"] and not r["final_status"]:
-        continue
-    # 跳过纯 GET 请求
-    if not r["channels"] and not r["model"] and not r["request_id"]:
-        continue
-    # 只看 API 调用
-    if not r["channels"] and not r["request_id"]:
+    # 只输出有 API 调用行为的 trace
+    if not r["channels"] and not r["final_status"] and not r["model"]:
         continue
 
     count += 1
-    t = r["time"][11:19] if len(r["time"]) > 19 else r["time"]
+    t = r["time"][11:19] if len(r["time"]) > 19 else ""
     model = r["model"][:24] if r["model"] else "?"
     rid_short = r["request_id"][-12:] if r["request_id"] else ""
+    key_short = key[-16:]
 
-    print("\033[0;34m[%s]\033[0m \033[1m%s\033[0m  rid=%s  key=%s" % (t, model, rid_short, key[-16:]))
+    if t:
+        print("\033[0;34m[%s]\033[0m \033[1m%s\033[0m  rid=%s" % (t, model, rid_short))
+    else:
+        print("\033[1m%s\033[0m  rid=%s" % (model, rid_short))
 
     # 每个 channel 一行
     for ch_id, info in r["channels"].items():
@@ -294,10 +284,7 @@ for key, r in list(traces.items())[-80:]:
         err = info["err"]
         up = info["upstream"]
 
-        if st == "200" or (not st and ev == "OK"):
-            marker = "v"
-            color = "\033[0;32m"
-        elif st and st[0] in ("4", "5"):
+        if st and st[0] in ("4", "5"):
             marker = "x"
             color = "\033[0;31m"
         else:
@@ -309,6 +296,7 @@ for key, r in list(traces.items())[-80:]:
         up_part = " \"%s\"" % up[:120] if up else ""
         print("  %s%s ch%s%s %s%s%s\033[0m" % (color, marker, ch_id, name_part, ev, err_part, up_part))
 
+    # 最终结果
     fs = r["final_status"]
     fc = r["final_cost"] or "?"
     if fs == "200":
@@ -326,5 +314,5 @@ for key, r in list(traces.items())[-80:]:
     print()
 
 if count == 0:
-    print("(最近日志中没有 API 调用记录)")
+    print("(no API calls in recent logs)")
 ' 2>/dev/null | tail -$(($(tput lines 2>/dev/null || echo 50) - 5))
