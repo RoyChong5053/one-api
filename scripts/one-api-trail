@@ -88,7 +88,7 @@ for line in sys.stdin:
     else:
         # 也输出其他相关事件
         print("%s  %s" % (head, msg[:60]))
-" 2>/dev/null
+' 2>/dev/null
   echo ""
   exit 0
 fi
