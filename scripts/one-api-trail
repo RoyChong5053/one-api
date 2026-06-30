@@ -80,7 +80,6 @@ for line in sys.stdin:
                                    "internal adaptor error", "relay retry channel selection failed"]):
         print("%s  \033[0;31mFAIL\033[0m   ch%s (%s)  status=%s  %s" % (head, ch, ch_name, status, msg[:50]))
     else:
-        # 打印有 channel_id 的其他事件
         if ch:
             print("%s  %s  ch=%s" % (head, msg[:50], ch))
 ' 2>/dev/null
@@ -120,7 +119,8 @@ for line in sys.stdin:
     if not key: continue
 
     if key not in buf:
-        buf[key] = {"trace_id": tid, "request_id": rid, "time": ts}
+        buf[key] = {"trace_id": tid, "request_id": rid, "time": ts,
+                     "final_status": "", "final_cost": ""}
     r = buf[key]
     while len(buf) > 200:
         buf.popitem(last=False)
@@ -148,7 +148,6 @@ for line in sys.stdin:
             print("  %s" % upstream[:150])
 
     elif "/v1/chat/completions" in url:
-        # Gin access log: msg like "200 POST"
         if "POST" in msg:
             status_from_msg = msg.split()[0] if msg else ""
             if status_from_msg == "200":
@@ -196,6 +195,8 @@ for line in sys.stdin:
             "trace_id": tid, "request_id": rid, "time": ts,
             "model": "", "channels": OrderedDict(),
             "retries": 0, "final_status": "", "final_cost": "",
+            "set_ch_names": [],  # channel names from "set channel" events
+            "last_set_name": "", # last channel name from "set channel"
         }
     r = traces[key]
 
@@ -211,9 +212,13 @@ for line in sys.stdin:
     upstream = data.get("upstream_error","") or ""
     cost = data.get("cost","") or ""
 
-    # ======== 收集 channel 事件 ========
+    # ─── "set channel <NAME> ratio" — 提取 channel name ───
+    set_match = re.search(r"set channel (.+) ratio to", msg)
+    if set_match:
+        r["set_ch_names"].append(set_match.group(1))
+        r["last_set_name"] = set_match.group(1)
 
-    # retry 选中
+    # ─── retry 选中 ───
     if "using channel to retry" in msg and ch:
         if ch not in r["channels"]:
             r["channels"][ch] = {"name": ch_name, "err": "", "upstream": "", "status": "", "event": "RETRY"}
@@ -221,7 +226,7 @@ for line in sys.stdin:
             r["channels"][ch]["event"] = "RETRY"
         r["retries"] += 1
 
-    # 各种 channel 错误
+    # ─── channel 错误事件 ───
     is_channel_error = any(kw in msg for kw in [
         "relay error", "relay retry skipped", "relay aborted by client",
         "internal adaptor error", "relay retry channel selection failed",
@@ -239,14 +244,12 @@ for line in sys.stdin:
         if ch_name:
             r["channels"][ch]["name"] = ch_name
 
-    # 初始分配 (只有 DEBUG=true 时才有)
+    # ─── 初始分配 (只有 DEBUG=true 时才有) ───
     if "using channel" in msg and ch and "retry" not in msg:
         if ch not in r["channels"]:
             r["channels"][ch] = {"name": ch_name, "err": "", "upstream": "", "event": "DIST", "status": ""}
 
-    # ======== 最终状态 ========
-
-    # Gin access log: msg 格式 "200 POST", 从中取状态码
+    # ─── 最终状态 ───
     if "/v1/chat/completions" in url and "POST" in msg:
         status_from_msg = msg.split()[0] if msg else ""
         if status_from_msg:
@@ -254,63 +257,84 @@ for line in sys.stdin:
         if cost:
             r["final_cost"] = cost
 
-    # record log 补充 cost (有时 gin log 没有 cost)
     if "record log" in msg and cost and not r["final_cost"]:
         r["final_cost"] = cost
 
 # ── 输出 ─────────────────────────────────
 count = 0
 for key, r in list(traces.items())[-80:]:
-    # 只输出有 API 调用行为的 trace
-    if not r["channels"] and not r["final_status"] and not r["model"]:
+    if not r["channels"] and not r["final_status"] and not r["model"] and not r["last_set_name"]:
         continue
 
     count += 1
     t = r["time"][11:19] if len(r["time"]) > 19 else ""
     model = r["model"][:24] if r["model"] else "?"
     rid_short = r["request_id"][-12:] if r["request_id"] else ""
-    key_short = key[-16:]
 
     if t:
         print("\033[0;34m[%s]\033[0m \033[1m%s\033[0m  rid=%s" % (t, model, rid_short))
     else:
         print("\033[1m%s\033[0m  rid=%s" % (model, rid_short))
 
-    # 每个 channel 一行
-    for ch_id, info in r["channels"].items():
-        name = info["name"]
-        ev = info["event"]
-        st = info["status"]
-        err = info["err"]
-        up = info["upstream"]
+    has_channel_events = bool(r["channels"])
 
-        if st and st[0] in ("4", "5"):
-            marker = "x"
-            color = "\033[0;31m"
+    if has_channel_events:
+        # ── 有 retry/error 事件的 trace: 展开每节点 ──
+        for ch_id, info in r["channels"].items():
+            name = info["name"]
+            ev = info["event"]
+            st = info["status"]
+            err = info["err"]
+            up = info["upstream"]
+
+            if st and st[0] in ("4", "5"):
+                marker = "x"
+                color = "\033[0;31m"
+            else:
+                marker = ">"
+                color = "\033[0;33m"
+
+            name_part = " (%s)" % name if name else ""
+            err_part = " \033[0;31m[%s]\033[0m" % err if err else ""
+            up_part = " \"%s\"" % up[:120] if up else ""
+            print("  %s%s ch%s%s %s%s%s\033[0m" % (color, marker, ch_id, name_part, ev, err_part, up_part))
+
+        # 最终结果
+        fs = r["final_status"]
+        fc = r["final_cost"] or "?"
+        if fs == "200":
+            fcolor = "\033[0;32m"
+            fmark = "v"
+        elif fs and fs[0] in ("4", "5"):
+            fcolor = "\033[0;31m"
+            fmark = "x"
         else:
-            marker = ">"
-            color = "\033[0;33m"
+            fcolor = "\033[0;33m"
+            fmark = "?"
+        retry_info = " (%d retries)" % r["retries"] if r["retries"] > 0 else ""
+        print("  %s%s %s  cost=%s%s\033[0m" % (fcolor, fmark, fs or "?", fc, retry_info))
 
-        name_part = " (%s)" % name if name else ""
-        err_part = " \033[0;31m[%s]\033[0m" % err if err else ""
-        up_part = " \"%s\"" % up[:120] if up else ""
-        print("  %s%s ch%s%s %s%s%s\033[0m" % (color, marker, ch_id, name_part, ev, err_part, up_part))
-
-    # 最终结果
-    fs = r["final_status"]
-    fc = r["final_cost"] or "?"
-    if fs == "200":
-        fcolor = "\033[0;32m"
-        fmark = "v"
-    elif fs and fs[0] in ("4", "5"):
-        fcolor = "\033[0;31m"
-        fmark = "x"
     else:
-        fcolor = "\033[0;33m"
-        fmark = "?"
+        # ── 无 retry 的简单请求: 单行显示 channel + 结果 ──
+        ch_name = r["last_set_name"]
+        fs = r["final_status"]
+        fc = r["final_cost"] or "?"
 
-    retry_info = " (%d retries)" % r["retries"] if r["retries"] > 0 else ""
-    print("  %s%s %s  cost=%s%s\033[0m" % (fcolor, fmark, fs or "?", fc, retry_info))
+        if fs == "200":
+            fcolor = "\033[0;32m"
+            fmark = "v"
+        elif fs and fs[0] in ("4", "5"):
+            fcolor = "\033[0;31m"
+            fmark = "x"
+        else:
+            fcolor = "\033[0;33m"
+            fmark = "?"
+
+        if ch_name:
+            print("  %s%s %s  %s  cost=%s\033[0m" % (fcolor, fmark, ch_name, fs or "?", fc))
+        else:
+            print("  %s%s %s  cost=%s\033[0m" % (fcolor, fmark, fs or "?", fc))
+
     print()
 
 if count == 0:
