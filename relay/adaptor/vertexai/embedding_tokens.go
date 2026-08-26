@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Laisky/errors/v2"
 	gmw "github.com/Laisky/gin-middlewares/v7"
@@ -49,7 +50,9 @@ func countGeminiEmbeddingTokens(c *gin.Context, meta *meta.Meta, contents []gemi
 		return nil, vertexAICountTokensError(http.StatusBadGateway, errors.Wrap(err, "get_vertex_access_token"))
 	}
 
-	req, err := http.NewRequestWithContext(gmw.Ctx(c), http.MethodPost, buildGeminiCountTokensURL(meta), bytes.NewReader(requestBody))
+	reqCtx, cancel := context.WithTimeout(gmw.Ctx(c), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, buildGeminiCountTokensURL(meta), bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, vertexAICountTokensError(http.StatusInternalServerError, errors.Wrap(err, "new_count_tokens_request"))
 	}

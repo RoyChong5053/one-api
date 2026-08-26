@@ -733,6 +733,27 @@ var (
 	// Recommended: 300 for most use cases
 	RelayTimeout = env.Int("RELAY_TIMEOUT", 0)
 
+	// RerankTimeout bounds rerank upstream requests separately from the general
+	// RelayTimeout. Reranking many documents on CPU-only devices can take several
+	// minutes, so a longer (or disabled) timeout is useful while keeping a tight
+	// timeout for chat/embedding traffic.
+	//
+	// When 0, falls back to RelayTimeout.
+	//
+	// Environment variable: RERANK_TIMEOUT
+	// Default: 600 (10 minutes)
+	// Unit: seconds
+	RerankTimeout = env.Int("RERANK_TIMEOUT", 600)
+
+	// FanOutMinBatchSize is the minimum number of input items (embedding texts or
+	// rerank documents) required before a request is split across multiple
+	// channels for parallel processing. Below this threshold the request is sent
+	// to a single channel as usual.
+	//
+	// Environment variable: FAN_OUT_MIN_BATCH_SIZE
+	// Default: 10
+	FanOutMinBatchSize = env.Int("FAN_OUT_MIN_BATCH_SIZE", 10)
+
 	// IdleTimeout controls how long to keep streaming connections alive without
 	// traffic before closing them. Prevents connection leaks from stalled streams.
 	//

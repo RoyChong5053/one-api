@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Laisky/errors/v2"
 	gmw "github.com/Laisky/gin-middlewares/v7"
@@ -131,7 +132,9 @@ func countEmbeddingTokens(ctx context.Context, meta *meta.Meta, contents []ChatC
 	}
 
 	countTokensURL := buildCountTokensURL(meta)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, countTokensURL, bytes.NewReader(requestBody))
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, countTokensURL, bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, openai.ErrorWrapper(errors.Wrap(err, "new_count_tokens_request"), "count_tokens_request_build_failed", http.StatusInternalServerError)
 	}

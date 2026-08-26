@@ -133,15 +133,12 @@ func Init() {
 		transport = createTransport(nil, false)
 	}
 
-	if config.RelayTimeout == 0 {
-		HTTPClient = &http.Client{
-			Transport: transport,
-		}
-	} else {
-		HTTPClient = &http.Client{
-			Timeout:   time.Duration(config.RelayTimeout) * time.Second,
-			Transport: transport,
-		}
+	// HTTPClient has no client-level Timeout cap. Per-request context deadlines
+	// are applied by the relay layer (DoRequestHelper) so that different relay
+	// modes can use different timeouts (e.g. rerank vs chat). A client-level cap
+	// would otherwise force a single timeout across all request types.
+	HTTPClient = &http.Client{
+		Transport: transport,
 	}
 
 	ImpatientHTTPClient = &http.Client{

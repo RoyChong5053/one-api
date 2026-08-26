@@ -15,6 +15,7 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
+	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/model"
 	"github.com/Laisky/one-api/relay"
@@ -26,9 +27,17 @@ import (
 )
 
 const (
-	// FanOutMinBatchSize is the minimum input array length to trigger fan-out.
-	FanOutMinBatchSize = 10
+	// defaultFanOutMinBatchSize is used only when the runtime config value is
+	// unavailable (e.g. in unit tests that do not initialize config).
+	defaultFanOutMinBatchSize = 10
 )
+
+func fanOutMinBatchSize() int {
+	if config.FanOutMinBatchSize > 0 {
+		return config.FanOutMinBatchSize
+	}
+	return defaultFanOutMinBatchSize
+}
 
 // fanoutRerankResultItem mirrors the rerank result structure for fan-out merging.
 type fanoutRerankResultItem struct {
@@ -39,9 +48,10 @@ type fanoutRerankResultItem struct {
 
 // fanOutEmbeddingResult holds the result from a single channel's embedding sub-request.
 type fanOutEmbeddingResult struct {
-	data  []openai.EmbeddingResponseItem
-	usage relaymodel.Usage
-	err   error
+	offset int                      // start index in the original input array
+	data   []openai.EmbeddingResponseItem
+	usage  relaymodel.Usage
+	err    error
 }
 
 // FanOutEmbeddingResponse is the merged embedding response from fan-out.
@@ -59,7 +69,7 @@ func TryFanOutEmbedding(
 	textRequest *relaymodel.GeneralOpenAIRequest,
 ) *FanOutEmbeddingResponse {
 	inputs := textRequest.ParseInput()
-	if len(inputs) < FanOutMinBatchSize {
+	if len(inputs) < fanOutMinBatchSize() {
 		return nil
 	}
 
@@ -99,22 +109,29 @@ func TryFanOutEmbedding(
 		wg.Add(1)
 		go func(idx int, channel *model.Channel) {
 			defer wg.Done()
-			results[idx] = fanOutEmbeddingSingle(nil, c, meta, channel, textRequest, splits[idx])
+			results[idx] = fanOutEmbeddingSingle(nil, c, meta, channel, textRequest, splits[idx].items, splits[idx].offset)
 		}(i, ch)
 	}
 	wg.Wait()
 
-	// Check for errors — if any sub-request failed, fall back to single channel
+	// Use results from successful sub-requests even if some failed; only fall
+	// back to the single-channel path when every sub-request failed.
+	var successful []fanOutEmbeddingResult
 	for _, r := range results {
 		if r.err != nil {
-			lg.Warn("fan-out sub-request failed, falling back to single channel",
+			lg.Warn("embedding fan-out sub-request failed, using partial results",
 				zap.Error(r.err))
-			return nil
+			continue
 		}
+		successful = append(successful, r)
+	}
+	if len(successful) == 0 {
+		lg.Warn("all embedding fan-out sub-requests failed, falling back to single channel")
+		return nil
 	}
 
 	// Merge results in original order
-	merged := mergeEmbeddingResults(results)
+	merged := mergeEmbeddingResults(successful)
 	merged.Model = textRequest.Model
 
 	return &FanOutEmbeddingResponse{
@@ -131,9 +148,10 @@ func fanOutEmbeddingSingle(
 	channel *model.Channel,
 	origRequest *relaymodel.GeneralOpenAIRequest,
 	texts []string,
+	offset int,
 ) fanOutEmbeddingResult {
 	if len(texts) == 0 {
-		return fanOutEmbeddingResult{}
+		return fanOutEmbeddingResult{offset: offset}
 	}
 
 	// Build a sub-request with the sliced input
@@ -189,18 +207,30 @@ func fanOutEmbeddingSingle(
 	}
 
 	return fanOutEmbeddingResult{
-		data:  embeddingResp.Data,
-		usage: embeddingResp.Usage,
+		offset: offset,
+		data:   embeddingResp.Data,
+		usage:  embeddingResp.Usage,
 	}
 }
 
-// splitInputsByWeight distributes items across channels proportionally to their weights.
-func splitInputsByWeight(items []string, channels []*model.Channel) [][]string {
+// weightedSplit is a contiguous slice of the original input together with its
+// starting offset in the original array. The offset is needed by rerank fan-out
+// so that each channel's returned indices can be mapped back to the original
+// documents array.
+type weightedSplit struct {
+	offset int
+	items  []string
+}
+
+// splitInputsByWeight distributes items across channels proportionally to their
+// weights, preserving original order. Each returned split records where in the
+// original array it starts.
+func splitInputsByWeight(items []string, channels []*model.Channel) []weightedSplit {
 	if len(channels) == 0 {
 		return nil
 	}
 	if len(channels) == 1 {
-		return [][]string{items}
+		return []weightedSplit{{offset: 0, items: items}}
 	}
 
 	var totalWeight uint
@@ -234,10 +264,13 @@ func splitInputsByWeight(items []string, channels []*model.Channel) [][]string {
 		}
 	}
 
-	result := make([][]string, len(channels))
+	result := make([]weightedSplit, len(channels))
 	offset := 0
 	for i, count := range counts {
-		result[i] = items[offset : offset+count]
+		result[i] = weightedSplit{
+			offset: offset,
+			items:  items[offset : offset+count],
+		}
 		offset += count
 	}
 
@@ -255,17 +288,22 @@ func mergeEmbeddingResults(results []fanOutEmbeddingResult) openai.EmbeddingResp
 	merged := make([]openai.EmbeddingResponseItem, 0, totalItems)
 	var totalUsage relaymodel.Usage
 
-	offset := 0
+	// Each result carries its start offset in the original input. A sub-request
+	// returns items with indices relative to its own slice, so the global index is
+	// offset + item.Index. Sorting by global index restores original input order,
+	// which also holds when some sub-requests failed and are skipped.
 	for _, r := range results {
 		for _, item := range r.data {
-			item.Index = offset
+			item.Index = r.offset + item.Index
 			merged = append(merged, item)
-			offset++
 		}
 		totalUsage.PromptTokens += r.usage.PromptTokens
 		totalUsage.CompletionTokens += r.usage.CompletionTokens
 		totalUsage.TotalTokens += r.usage.TotalTokens
 	}
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Index < merged[j].Index
+	})
 
 	return openai.EmbeddingResponse{
 		Object: "list",
@@ -294,7 +332,7 @@ func TryFanOutRerank(
 	meta *metalib.Meta,
 	rerankRequest *relaymodel.RerankRequest,
 ) *FanOutRerankResponse {
-	if len(rerankRequest.Documents) < FanOutMinBatchSize {
+	if len(rerankRequest.Documents) < fanOutMinBatchSize() {
 		return nil
 	}
 
@@ -330,27 +368,37 @@ func TryFanOutRerank(
 		wg.Add(1)
 		go func(idx int, channel *model.Channel) {
 			defer wg.Done()
-			results[idx] = fanOutRerankSingle(nil, c, meta, channel, rerankRequest, docSplits[idx])
+			results[idx] = fanOutRerankSingle(nil, c, meta, channel, rerankRequest, docSplits[idx].items, docSplits[idx].offset)
 		}(i, ch)
 	}
 	wg.Wait()
 
+	// Keep results from successful sub-requests even if some failed; only fall
+	// back to the single-channel path when every sub-request failed.
+	var successful []fanOutRerankResult
 	for _, r := range results {
 		if r.err != nil {
-			lg.Warn("rerank fan-out sub-request failed, falling back",
+			lg.Warn("rerank fan-out sub-request failed, using partial results",
 				zap.Error(r.err))
-			return nil
+			continue
 		}
+		successful = append(successful, r)
+	}
+	if len(successful) == 0 {
+		lg.Warn("all rerank fan-out sub-requests failed, falling back to single channel")
+		return nil
 	}
 
-	merged := mergeRerankResults(results, rerankRequest.TopN)
+	merged := mergeRerankResults(successful, rerankRequest.TopN)
 	return &FanOutRerankResponse{
 		Response: merged,
 		Usage:    merged["usage"].(relaymodel.Usage),
 	}
 }
 
-// fanOutRerankSingle sends a rerank sub-request to a single channel.
+// fanOutRerankSingle sends a rerank sub-request to a single channel. The offset
+// is the position of this channel's document slice in the original documents
+// array, so each returned index can be mapped back to the global array.
 func fanOutRerankSingle(
 	_ context.Context,
 	originalCtx *gin.Context,
@@ -358,6 +406,7 @@ func fanOutRerankSingle(
 	channel *model.Channel,
 	origRequest *relaymodel.RerankRequest,
 	documents []string,
+	offset int,
 ) fanOutRerankResult {
 	if len(documents) == 0 {
 		return fanOutRerankResult{}
@@ -425,6 +474,11 @@ func fanOutRerankSingle(
 		results = rerankResp.Data
 	}
 
+	// Map each result back to its original global position in the documents array.
+	for i := range results {
+		results[i].Index = offset + results[i].Index
+	}
+
 	var usage relaymodel.Usage
 	if rerankResp.Usage != nil {
 		usage = *rerankResp.Usage
@@ -437,7 +491,8 @@ func fanOutRerankSingle(
 }
 
 // mergeRerankResults merges rerank results from multiple channels, sorts by
-// relevance score, and applies top_n.
+// relevance score, and applies top_n. The original (global) document indices
+// are preserved so the caller can map results back to the documents it sent.
 func mergeRerankResults(results []fanOutRerankResult, topN *int) map[string]any {
 	var allResults []fanoutRerankResultItem
 	var totalUsage relaymodel.Usage
@@ -455,10 +510,6 @@ func mergeRerankResults(results []fanOutRerankResult, topN *int) map[string]any 
 
 	if topN != nil && *topN < len(allResults) {
 		allResults = allResults[:*topN]
-	}
-
-	for i := range allResults {
-		allResults[i].Index = i
 	}
 
 	return map[string]any{

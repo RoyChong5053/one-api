@@ -1,9 +1,11 @@
 package adaptor
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Laisky/errors/v2"
 	gmw "github.com/Laisky/gin-middlewares/v7"
@@ -12,10 +14,12 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Laisky/one-api/common/client"
+	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/common/tracing"
 	"github.com/Laisky/one-api/model"
 	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 const (
@@ -83,7 +87,23 @@ func DoRequestHelper(a Adaptor, c *gin.Context, meta *meta.Meta, requestBody io.
 		}
 	}
 
-	req, err := gutils.NewReusableRequest(gmw.Ctx(c),
+	// Apply a per-request context deadline so that different relay modes can use
+	// different upstream timeouts. Rerank (which may run many documents on slow
+	// CPU-only devices) uses RerankTimeout; everything else uses RelayTimeout.
+	reqCtx := gmw.Ctx(c)
+	var timeout time.Duration
+	if meta != nil && meta.Mode == relaymode.Rerank {
+		timeout = time.Duration(config.RerankTimeout) * time.Second
+	} else {
+		timeout = time.Duration(config.RelayTimeout) * time.Second
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(reqCtx, timeout)
+		defer cancel()
+	}
+
+	req, err := gutils.NewReusableRequest(reqCtx,
 		c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
 		return nil, errors.Wrap(err, "new request failed")

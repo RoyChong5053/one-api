@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -136,6 +137,14 @@ func GetResponseBody(method, url string, channel *model.Channel, headers http.He
 	for k := range headers {
 		req.Header.Add(k, headers.Get(k))
 	}
+	// Ensure a bounded timeout even though HTTPClient no longer carries one.
+	timeout := time.Duration(config.RelayTimeout) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req = req.WithContext(ctx)
 	res, err := client.HTTPClient.Do(req)
 	if err != nil {
 		return nil, errors.Wrapf(err, "upstream request failed for channel %d", channel.Id)
