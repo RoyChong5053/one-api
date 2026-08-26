@@ -29,6 +29,7 @@ import (
 	"github.com/Laisky/one-api/model"
 	"github.com/Laisky/one-api/monitor"
 	"github.com/Laisky/one-api/relay"
+	"github.com/Laisky/one-api/relay/adaptor"
 	"github.com/Laisky/one-api/relay/adaptor/openai"
 
 	"github.com/Laisky/one-api/relay/channeltype"
@@ -54,6 +55,121 @@ func buildTestRequest(model string) *relaymodel.GeneralOpenAIRequest {
 	}
 	testRequest.Messages = append(testRequest.Messages, testMessage)
 	return testRequest
+}
+
+func buildRerankTestRequest(model string) *relaymodel.RerankRequest {
+	if strings.TrimSpace(model) == "" {
+		model = "reranker"
+	}
+	topN := 2
+	return &relaymodel.RerankRequest{
+		Model:     model,
+		Query:     "hello world",
+		Documents: []string{"hello world", "goodbye world"},
+		TopN:      &topN,
+	}
+}
+
+func buildEmbeddingTestRequest(model string) *relaymodel.GeneralOpenAIRequest {
+	if strings.TrimSpace(model) == "" {
+		model = "text-embedding-3-small"
+	}
+	return &relaymodel.GeneralOpenAIRequest{
+		Model: model,
+		Input: "hello world",
+	}
+}
+
+func getChannelTestMode(channel *model.Channel) int {
+	custom := channel.GetSupportedEndpoints()
+	var names []string
+	if len(custom) > 0 {
+		names = custom
+	} else {
+		names = channeltype.DefaultEndpointNamesForChannelType(channel.Type)
+	}
+	hasChat := false
+	hasRerank := false
+	hasEmbed := false
+	for _, n := range names {
+		switch strings.ToLower(strings.TrimSpace(n)) {
+		case "chat_completions":
+			hasChat = true
+		case "rerank":
+			hasRerank = true
+		case "embeddings":
+			hasEmbed = true
+		}
+	}
+	if !hasChat {
+		if hasRerank {
+			return relaymode.Rerank
+		}
+		if hasEmbed {
+			return relaymode.Embeddings
+		}
+	}
+	return relaymode.ChatCompletions
+}
+
+func parseRerankTestResponse(resp string) (string, error) {
+	var parsed struct {
+		Results []struct {
+			Index          int     `json:"index"`
+			RelevanceScore float64 `json:"relevance_score"`
+		} `json:"results"`
+		Data []struct {
+			Index          int     `json:"index"`
+			RelevanceScore float64 `json:"relevance_score"`
+		} `json:"data"`
+		Error   *relaymodel.Error `json:"error"`
+		Message string            `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(resp), &parsed); err != nil {
+		return "", errors.Wrap(err, "unmarshal rerank response")
+	}
+	if parsed.Error != nil && strings.TrimSpace(parsed.Error.Message) != "" {
+		return "", errors.New(parsed.Error.Message)
+	}
+	if strings.TrimSpace(parsed.Message) != "" && len(parsed.Results) == 0 && len(parsed.Data) == 0 {
+		// Some error envelopes use "message" without "error"
+		// If results are empty and message is present, treat as error only when no results
+		// Fall through to empty check below
+	}
+	count := len(parsed.Results)
+	if count == 0 {
+		count = len(parsed.Data)
+	}
+	if count == 0 {
+		return "", errors.New("rerank response has no results")
+	}
+	return fmt.Sprintf("rerank ok (%d results)", count), nil
+}
+
+func parseEmbeddingTestResponse(resp string) (string, error) {
+	var parsed struct {
+		Data []struct {
+			Embedding []float64 `json:"embedding"`
+			Index     int       `json:"index"`
+			Object    string    `json:"object"`
+		} `json:"data"`
+		Error   *relaymodel.Error `json:"error"`
+		Message string            `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(resp), &parsed); err != nil {
+		return "", errors.Wrap(err, "unmarshal embedding response")
+	}
+	if parsed.Error != nil && strings.TrimSpace(parsed.Error.Message) != "" {
+		return "", errors.New(parsed.Error.Message)
+	}
+	if len(parsed.Data) == 0 {
+		return "", errors.New("embedding response has no data")
+	}
+	dim := len(parsed.Data[0].Embedding)
+	if dim == 0 {
+		return fmt.Sprintf("embedding ok (%d vectors)", len(parsed.Data)), nil
+	}
+	return fmt.Sprintf("embedding ok (dim=%d, count=%d)", dim, len(parsed.Data)), nil
 }
 
 func parseTestResponse(resp string) (*openai.TextResponse, string, error) {
@@ -315,6 +431,285 @@ func testChannel(ctx context.Context, channel *model.Channel, request *relaymode
 	return responseMessage, nil, nil
 }
 
+func testRerankChannel(ctx context.Context, channel *model.Channel, request *relaymodel.RerankRequest) (responseMessage string, err error, openaiErr *relaymodel.Error) {
+	lg := gmw.GetLogger(ctx)
+	startTime := time.Now()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = &http.Request{
+		Method: http.MethodPost,
+		URL:    &url.URL{Path: "/v1/rerank"},
+		Body:   nil,
+		Header: make(http.Header),
+	}
+	c.Request.Header.Set("Authorization", "Bearer "+channel.Key)
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(ctxkey.Channel, channel.Type)
+	c.Set(ctxkey.BaseURL, channel.GetBaseURL())
+	cfg, _ := channel.LoadConfig()
+	c.Set(ctxkey.Config, cfg)
+	middleware.SetupContextForSelectedChannel(c, channel, "")
+	meta := meta.GetByContext(c)
+	apiType := channeltype.ToAPIType(channel.Type)
+	adaptorImpl := relay.GetAdaptor(apiType)
+	if adaptorImpl == nil {
+		return "", errors.Wrapf(nil, "invalid api type: %d, adaptor is nil", apiType), nil
+	}
+	adaptorImpl.Init(meta)
+
+	requestedModel := strings.TrimSpace(request.Model)
+	resolvedModel := requestedModel
+	modelMap := channel.GetModelMapping()
+	if resolvedModel == "" || !strings.Contains(channel.Models, resolvedModel) {
+		modelNames := strings.Split(channel.Models, ",")
+		if len(modelNames) > 0 {
+			resolvedModel = strings.TrimSpace(modelNames[0])
+		}
+	}
+	if modelMap != nil && modelMap[resolvedModel] != "" {
+		resolvedModel = modelMap[resolvedModel]
+	}
+	request.Model = resolvedModel
+	meta.OriginModelName = requestedModel
+	meta.ActualModelName = resolvedModel
+	c.Set(ctxkey.RequestModel, resolvedModel)
+
+	lg.Debug("channel test (rerank): resolved model",
+		zap.String("origin_model", meta.OriginModelName),
+		zap.String("resolved_model", resolvedModel),
+		zap.Int("api_type", apiType),
+		zap.String("request_path", c.Request.URL.Path),
+	)
+
+	rerankAdaptor, ok := adaptorImpl.(adaptor.RerankAdaptor)
+	if !ok {
+		return "", errors.Errorf("rerank not supported by adaptor type %d", channel.Type), nil
+	}
+	convertedRequest, convErr := rerankAdaptor.ConvertRerankRequest(c, request)
+	if convErr != nil {
+		return "", errors.Wrap(convErr, "failed to convert rerank request"), nil
+	}
+	c.Set(ctxkey.ConvertedRequest, convertedRequest)
+	jsonData, err := json.Marshal(convertedRequest)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to marshal rerank request"), nil
+	}
+
+	var actualUsage *relaymodel.Usage
+	defer func() {
+		logContent := fmt.Sprintf("test channel %s succeed，response: %s", channel.Name, responseMessage)
+		if err != nil || openaiErr != nil {
+			msg := ""
+			if err != nil {
+				msg = err.Error()
+			} else {
+				msg = openaiErr.Message
+			}
+			logContent = fmt.Sprintf("test channel %s failed, error: %s", channel.Name, msg)
+		}
+		testLog := &model.Log{
+			ChannelId:       channel.Id,
+			ModelName:       resolvedModel,
+			OriginModelName: requestedModel,
+			Content:         logContent,
+			ElapsedTime:     helper.CalcElapsedTime(startTime),
+		}
+		if actualUsage != nil {
+			testLog.PromptTokens = actualUsage.PromptTokens
+			testLog.CompletionTokens = actualUsage.CompletionTokens
+		}
+		go model.RecordTestLog(ctx, testLog)
+	}()
+
+	if fullURL, urlErr := adaptorImpl.GetRequestURL(meta); urlErr == nil {
+		lg.Debug("prepare rerank test request",
+			zap.String("actual_model", meta.ActualModelName),
+			zap.Int("channel_id", channel.Id),
+			zap.String("upstream_url", fullURL),
+			zap.ByteString("test_request", jsonData))
+	} else {
+		return "", errors.Wrap(urlErr, "failed to build upstream request URL"), nil
+	}
+	requestBody := bytes.NewBuffer(jsonData)
+	c.Request.Body = io.NopCloser(requestBody)
+	var resp *http.Response
+	resp, err = adaptorImpl.DoRequest(c, meta, requestBody)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to do request"), nil
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	if resp != nil && resp.StatusCode != http.StatusOK {
+		wrappedErr := controller.RelayErrorHandlerWithContext(c, resp)
+		msg := wrappedErr.Error.Message
+		if msg != "" {
+			msg = ", error message: " + msg
+		}
+		err = errors.Wrapf(nil, "http status code: [%d]%s", resp.StatusCode, msg)
+		return "", err, &wrappedErr.Error
+	}
+	usage, respErr := adaptorImpl.DoResponse(c, resp, meta)
+	if respErr != nil {
+		err = errors.Wrapf(nil, "response error: %s", respErr.Error.Message)
+		return "", err, &respErr.Error
+	}
+	// usage may be nil for rerank forwarding that writes directly; treat as non-fatal
+	if usage != nil {
+		actualUsage = usage
+	}
+	rawResponse := w.Body.String()
+	msg, perr := parseRerankTestResponse(rawResponse)
+	if perr != nil {
+		return "", errors.Wrapf(perr, "failed to parse rerank response: %s", rawResponse), nil
+	}
+	responseMessage = msg
+	result := w.Result()
+	respBody, _ := io.ReadAll(result.Body)
+	lg.Debug("testing rerank channel response",
+		zap.Int("channel_id", channel.Id),
+		zap.Int("status", responseStatus(resp)),
+		zap.Int("response_bytes", len(respBody)))
+	return responseMessage, nil, nil
+}
+
+func testEmbeddingChannel(ctx context.Context, channel *model.Channel, request *relaymodel.GeneralOpenAIRequest) (responseMessage string, err error, openaiErr *relaymodel.Error) {
+	lg := gmw.GetLogger(ctx)
+	startTime := time.Now()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = &http.Request{
+		Method: http.MethodPost,
+		URL:    &url.URL{Path: "/v1/embeddings"},
+		Body:   nil,
+		Header: make(http.Header),
+	}
+	c.Request.Header.Set("Authorization", "Bearer "+channel.Key)
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(ctxkey.Channel, channel.Type)
+	c.Set(ctxkey.BaseURL, channel.GetBaseURL())
+	cfg, _ := channel.LoadConfig()
+	c.Set(ctxkey.Config, cfg)
+	middleware.SetupContextForSelectedChannel(c, channel, "")
+	meta := meta.GetByContext(c)
+	apiType := channeltype.ToAPIType(channel.Type)
+	adaptorImpl := relay.GetAdaptor(apiType)
+	if adaptorImpl == nil {
+		return "", errors.Wrapf(nil, "invalid api type: %d, adaptor is nil", apiType), nil
+	}
+	adaptorImpl.Init(meta)
+
+	requestedModel := strings.TrimSpace(request.Model)
+	resolvedModel := requestedModel
+	modelMap := channel.GetModelMapping()
+	if resolvedModel == "" || !strings.Contains(channel.Models, resolvedModel) {
+		modelNames := strings.Split(channel.Models, ",")
+		if len(modelNames) > 0 {
+			resolvedModel = strings.TrimSpace(modelNames[0])
+		}
+	}
+	if modelMap != nil && modelMap[resolvedModel] != "" {
+		resolvedModel = modelMap[resolvedModel]
+	}
+	request.Model = resolvedModel
+	meta.OriginModelName = requestedModel
+	meta.ActualModelName = resolvedModel
+	c.Set(ctxkey.RequestModel, resolvedModel)
+
+	lg.Debug("channel test (embeddings): resolved model",
+		zap.String("origin_model", meta.OriginModelName),
+		zap.String("resolved_model", resolvedModel),
+		zap.Int("api_type", apiType),
+		zap.String("request_path", c.Request.URL.Path),
+	)
+
+	convertedRequest, err := adaptorImpl.ConvertRequest(c, relaymode.Embeddings, request)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to convert embedding request"), nil
+	}
+	c.Set(ctxkey.ConvertedRequest, convertedRequest)
+	jsonData, err := json.Marshal(convertedRequest)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to marshal embedding request"), nil
+	}
+
+	var actualUsage *relaymodel.Usage
+	defer func() {
+		logContent := fmt.Sprintf("test channel %s succeed，response: %s", channel.Name, responseMessage)
+		if err != nil || openaiErr != nil {
+			msg := ""
+			if err != nil {
+				msg = err.Error()
+			} else {
+				msg = openaiErr.Message
+			}
+			logContent = fmt.Sprintf("test channel %s failed, error: %s", channel.Name, msg)
+		}
+		testLog := &model.Log{
+			ChannelId:       channel.Id,
+			ModelName:       resolvedModel,
+			OriginModelName: requestedModel,
+			Content:         logContent,
+			ElapsedTime:     helper.CalcElapsedTime(startTime),
+		}
+		if actualUsage != nil {
+			testLog.PromptTokens = actualUsage.PromptTokens
+			testLog.CompletionTokens = actualUsage.CompletionTokens
+		}
+		go model.RecordTestLog(ctx, testLog)
+	}()
+
+	if fullURL, urlErr := adaptorImpl.GetRequestURL(meta); urlErr == nil {
+		lg.Debug("prepare embedding test request",
+			zap.String("actual_model", meta.ActualModelName),
+			zap.Int("channel_id", channel.Id),
+			zap.String("upstream_url", fullURL),
+			zap.ByteString("test_request", jsonData))
+	} else {
+		return "", errors.Wrap(urlErr, "failed to build upstream request URL"), nil
+	}
+	requestBody := bytes.NewBuffer(jsonData)
+	c.Request.Body = io.NopCloser(requestBody)
+	var resp *http.Response
+	resp, err = adaptorImpl.DoRequest(c, meta, requestBody)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to do request"), nil
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	if resp != nil && resp.StatusCode != http.StatusOK {
+		wrappedErr := controller.RelayErrorHandlerWithContext(c, resp)
+		msg := wrappedErr.Error.Message
+		if msg != "" {
+			msg = ", error message: " + msg
+		}
+		err = errors.Wrapf(nil, "http status code: [%d]%s", resp.StatusCode, msg)
+		return "", err, &wrappedErr.Error
+	}
+	usage, respErr := adaptorImpl.DoResponse(c, resp, meta)
+	if respErr != nil {
+		err = errors.Wrapf(nil, "response error: %s", respErr.Error.Message)
+		return "", err, &respErr.Error
+	}
+	if usage != nil {
+		actualUsage = usage
+	}
+	rawResponse := w.Body.String()
+	msg, perr := parseEmbeddingTestResponse(rawResponse)
+	if perr != nil {
+		return "", errors.Wrapf(perr, "failed to parse embedding response: %s", rawResponse), nil
+	}
+	responseMessage = msg
+	result := w.Result()
+	respBody, _ := io.ReadAll(result.Body)
+	lg.Debug("testing embedding channel response",
+		zap.Int("channel_id", channel.Id),
+		zap.Int("status", responseStatus(resp)),
+		zap.Int("response_bytes", len(respBody)))
+	return responseMessage, nil, nil
+}
+
 // responseStatus returns the response status code or zero when the response is nil.
 func responseStatus(resp *http.Response) int {
 	if resp == nil {
@@ -369,9 +764,21 @@ func TestChannel(c *gin.Context) {
 
 	ctx := gmw.SetLogger(c, lg)
 
-	testRequest := buildTestRequest(modelName)
+	mode := getChannelTestMode(channel)
 	tik := time.Now()
-	responseMessage, err, openaiErr := testChannel(ctx, channel, testRequest)
+	var responseMessage string
+	var openaiErr *relaymodel.Error
+	switch mode {
+	case relaymode.Rerank:
+		rerankReq := buildRerankTestRequest(modelName)
+		responseMessage, err, openaiErr = testRerankChannel(ctx, channel, rerankReq)
+	case relaymode.Embeddings:
+		embedReq := buildEmbeddingTestRequest(modelName)
+		responseMessage, err, openaiErr = testEmbeddingChannel(ctx, channel, embedReq)
+	default:
+		testRequest := buildTestRequest(modelName)
+		responseMessage, err, openaiErr = testChannel(ctx, channel, testRequest)
+	}
 	tok := time.Now()
 	milliseconds := tok.Sub(tik).Milliseconds()
 	if err != nil || openaiErr != nil {
@@ -450,8 +857,20 @@ func testChannels(ctx context.Context, notify bool, scope string) error {
 			if chosenModel == "" {
 				chosenModel = channel.GetCheapestSupportedModel()
 			}
-			testRequest := buildTestRequest(chosenModel)
-			_, err, openaiErr := testChannel(ctx, channel, testRequest)
+			mode := getChannelTestMode(channel)
+			var err error
+			var openaiErr *relaymodel.Error
+			switch mode {
+			case relaymode.Rerank:
+				rerankReq := buildRerankTestRequest(chosenModel)
+				_, err, openaiErr = testRerankChannel(ctx, channel, rerankReq)
+			case relaymode.Embeddings:
+				embedReq := buildEmbeddingTestRequest(chosenModel)
+				_, err, openaiErr = testEmbeddingChannel(ctx, channel, embedReq)
+			default:
+				testRequest := buildTestRequest(chosenModel)
+				_, err, openaiErr = testChannel(ctx, channel, testRequest)
+			}
 			tok := time.Now()
 			milliseconds := tok.Sub(tik).Milliseconds()
 			if isChannelEnabled && milliseconds > disableThreshold {

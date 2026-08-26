@@ -155,6 +155,7 @@ func DefaultEndpointsForChannelType(channelType int) []Endpoint {
 		EndpointChatCompletions,
 		EndpointCompletions,
 		EndpointEmbeddings,
+		EndpointRerank,
 		EndpointImagesGenerations,
 		EndpointAudioSpeech,
 		EndpointAudioTranscription,

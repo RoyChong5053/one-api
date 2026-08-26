@@ -112,6 +112,8 @@ func (a *Adaptor) DoResponse(c *gin.Context,
 			}
 		case relaymode.Embeddings:
 			err, usage = EmbeddingHandler(c, resp, meta.PromptTokens, meta.ActualModelName)
+		case relaymode.Rerank:
+			err, usage = RerankHandler(c, resp, meta.PromptTokens)
 		default:
 			err, usage = Handler(c, resp, meta.PromptTokens, meta.ActualModelName)
 		}
