@@ -83,6 +83,49 @@ func RelayRerankHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	provisionalLogId := recordProvisionalLog(c, meta, rerankRequest.Model, preConsumedQuota)
 	c.Set(ctxkey.ProvisionalLogId, provisionalLogId)
 
+	// Try rerank fan-out: split large document batches across multiple channels
+	if fanOutResult := TryFanOutRerank(c, meta, rerankRequest); fanOutResult != nil {
+		respBytes, marshalErr := json.Marshal(fanOutResult.Response)
+		if marshalErr != nil {
+			lg.Error("failed to marshal fan-out rerank response", zap.Error(marshalErr))
+			_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "fanout_rerank_marshal_failed")
+			return openai.ErrorWrapper(marshalErr, "fanout_rerank_marshal_failed", http.StatusInternalServerError)
+		}
+		c.Writer.Header().Set("Content-Type", "application/json")
+		c.Writer.WriteHeader(http.StatusOK)
+		if _, wErr := c.Writer.Write(respBytes); wErr != nil {
+			lg.Warn("failed to write fan-out rerank response", zap.Error(wErr))
+		}
+		// Post-consume billing with merged usage
+		usage := &fanOutResult.Usage
+		_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "pre_billing_reconcile_fanout_rerank")
+		preConsumedQuota = 0
+		if usage != nil {
+			metrics.GlobalRecorder.RecordRelayRequest(
+				meta.StartTime, meta.ChannelId, channeltype.IdToName(meta.ChannelType),
+				meta.ActualModelName, strconv.Itoa(meta.UserId), meta.Group,
+				strconv.Itoa(meta.TokenId), c.GetString(ctxkey.APIFormat),
+				relaymode.String(meta.Mode), true,
+				usage.PromptTokens, usage.CompletionTokens, 0,
+			)
+		}
+		markBillingReconciled(c)
+		graceful.GoCritical(gmw.BackgroundCtx(c), "postBilling", func(bctx context.Context) {
+			bctx, cancel := context.WithTimeout(bctx, time.Duration(config.BillingTimeoutSec)*time.Second)
+			defer cancel()
+			done := make(chan bool, 1)
+			go func() {
+				_ = postConsumeRerankQuota(bctx, usage, meta, rerankRequest, preConsumedQuota, totalQuota, modelRatio, groupRatio)
+				done <- true
+			}()
+			select {
+			case <-done:
+			case <-bctx.Done():
+			}
+		})
+		return nil
+	}
+
 	adaptorImpl := relay.GetAdaptor(meta.APIType)
 	if adaptorImpl == nil {
 		_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "invalid_api_type")

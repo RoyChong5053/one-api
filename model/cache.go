@@ -427,9 +427,9 @@ func removeExpiredSuspensions() {
 	}
 }
 
-// isChannelSuspendedInCache reports whether the channel is currently excluded
+// IsChannelSuspendedInCache reports whether the channel is currently excluded
 // by the in-memory circuit breaker.
-func isChannelSuspendedInCache(channelId int) bool {
+func IsChannelSuspendedInCache(channelId int) bool {
 	suspendedChannelsMu.RLock()
 	defer suspendedChannelsMu.RUnlock()
 	until, ok := suspendedChannels[channelId]
@@ -733,7 +733,7 @@ func CacheGetSatisfiedChannelExcluding(group string, model string, preferLowestP
 		if excludeChannelIds[channel.Id] {
 			continue
 		}
-		if isChannelSuspendedInCache(channel.Id) {
+		if IsChannelSuspendedInCache(channel.Id) {
 			continue
 		}
 		candidateChannels = append(candidateChannels, channel)
@@ -851,6 +851,8 @@ func CacheGetSatisfiedChannelExcluding(group string, model string, preferLowestP
 
 // selectByHealthWeight picks a channel using health-weighted random selection.
 // Healthier channels (higher recent success rate) are more likely to be chosen.
+// The channel's configured Weight field is used as a base multiplier: a channel
+// with weight=3 receives roughly 3x the traffic of weight=1 (before health adjustment).
 func selectByHealthWeight(channels []*Channel, model string) *Channel {
 	if len(channels) == 0 {
 		return nil
@@ -859,20 +861,21 @@ func selectByHealthWeight(channels []*Channel, model string) *Channel {
 		return channels[0]
 	}
 
-	// Build a weight for each channel based on its health score.
-	// A minimum weight of 0.1 prevents completely starving degraded channels
+	// Build a weight for each channel combining its configured Weight and health score.
+	// A minimum health weight of 0.1 prevents completely starving degraded channels
 	// that might have recovered.
 	weights := make([]float64, len(channels))
 	var totalWeight float64
-	const minWeight = 0.1
+	const minHealthWeight = 0.1
 	for i, ch := range channels {
-		score := GetChannelHealthScore(ch.Id)
-		w := score
-		if w < minWeight {
-			w = minWeight
+		healthScore := GetChannelHealthScore(ch.Id)
+		hw := healthScore
+		if hw < minHealthWeight {
+			hw = minHealthWeight
 		}
-		weights[i] = w
-		totalWeight += w
+		// Combine configured weight with health score
+		weights[i] = float64(ch.GetWeight()) * hw
+		totalWeight += weights[i]
 	}
 
 	// Weighted random selection

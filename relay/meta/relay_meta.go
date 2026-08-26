@@ -162,3 +162,27 @@ func (m *Meta) EnsureActualModelName(fallback string) {
 	}
 	m.ActualModelName = mapped
 }
+
+// CloneMeta creates a copy of the given Meta with channel-specific fields
+// overridden by the provided channel. This is used by fan-out logic to create
+// independent meta objects for parallel sub-requests to different channels.
+func CloneMeta(orig *Meta, channel *model.Channel) *Meta {
+	if orig == nil {
+		return nil
+	}
+	clone := *orig
+	clone.ChannelType = channel.Type
+	clone.ChannelId = channel.Id
+	clone.BaseURL = channel.GetBaseURL()
+	clone.APIKey = channel.Key
+	clone.ModelMapping = channel.GetModelMapping()
+	clone.APIType = channeltype.ToAPIType(channel.Type)
+	clone.ActualModelName = GetMappedModelName(clone.OriginModelName, clone.ModelMapping)
+	clone.EnsureActualModelName(clone.OriginModelName)
+	cfg, _ := channel.LoadConfig()
+	clone.Config = cfg
+	if clone.BaseURL == "" {
+		clone.BaseURL = channeltype.ChannelBaseURLs[clone.ChannelType]
+	}
+	return &clone
+}

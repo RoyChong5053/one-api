@@ -154,6 +154,41 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		streaming.StoreTracker(c, tracker)
 	}
 
+	// Try embedding fan-out: split large batches across multiple channels in parallel
+	if meta.Mode == relaymode.Embeddings {
+		if fanOutResult := TryFanOutEmbedding(c, meta, textRequest); fanOutResult != nil {
+			respBytes, marshalErr := json.Marshal(fanOutResult.Response)
+			if marshalErr != nil {
+				lg.Error("failed to marshal fan-out embedding response", zap.Error(marshalErr))
+				_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "fanout_marshal_failed")
+				return openai.ErrorWrapper(marshalErr, "fanout_marshal_failed", http.StatusInternalServerError)
+			}
+			c.Writer.Header().Set("Content-Type", "application/json")
+			c.Writer.WriteHeader(http.StatusOK)
+			if _, wErr := c.Writer.Write(respBytes); wErr != nil {
+				lg.Warn("failed to write fan-out embedding response", zap.Error(wErr))
+			}
+			// Post-consume billing with merged usage
+			usage := &fanOutResult.Usage
+			_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "pre_billing_reconcile_fanout")
+			markBillingReconciled(c)
+			graceful.GoCritical(gmw.BackgroundCtx(c), "postBilling", func(bctx context.Context) {
+				bctx, cancel := context.WithTimeout(bctx, time.Duration(config.BillingTimeoutSec)*time.Second)
+				defer cancel()
+				done := make(chan bool, 1)
+				go func() {
+					_ = postConsumeQuota(bctx, usage, meta, textRequest, ratio, preConsumedQuota, 0, modelRatio, channelModelRatio, groupRatio, systemPromptReset, channelModelConfigs, channelCompletionRatio)
+					done <- true
+				}()
+				select {
+				case <-done:
+				case <-bctx.Done():
+				}
+			})
+			return nil
+		}
+	}
+
 	requestAdaptor.Init(meta)
 	if registry != nil {
 		response, usage, mcpSummary, incrementalCharged, execErr := executeChatMCPToolLoop(c, meta, textRequest, registry, preConsumedQuota)
