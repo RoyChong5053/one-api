@@ -762,7 +762,14 @@ func EmbeddingHandler(c *gin.Context, resp *http.Response, promptTokens int, mod
 	embeddingResponse.Usage = usage
 	c.Set(ctxkey.ConvertedResponse, embeddingResponse)
 
+	// Forward upstream headers, but skip CORS headers: the gin CORS middleware
+	// already sets them, and copying llama.cpp's empty Access-Control-Allow-Origin
+	// alongside the middleware's `*` produces a duplicate header that browsers
+	// reject (CORS check fails). Mirrors RerankHandler behaviour.
 	for key, values := range resp.Header {
+		if strings.HasPrefix(strings.ToLower(key), "access-control-") {
+			continue
+		}
 		for _, value := range values {
 			c.Writer.Header().Add(key, value)
 		}
