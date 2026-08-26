@@ -98,9 +98,13 @@ func DoRequestHelper(a Adaptor, c *gin.Context, meta *meta.Meta, requestBody io.
 		timeout = time.Duration(config.RelayTimeout) * time.Second
 	}
 	if timeout > 0 {
-		var cancel context.CancelFunc
-		reqCtx, cancel = context.WithTimeout(reqCtx, timeout)
-		defer cancel()
+		// Keep the deadline for the whole upstream exchange (including response
+		// body read), but do NOT call cancel() here: resp.Body is consumed by
+		// the caller after this function returns, and canceling immediately
+		// aborts that read with "context canceled". The deadline fires
+		// automatically at timeout, matching the historical http.Client.Timeout
+		// behavior (total request + body read capped at the timeout).
+		reqCtx, _ = context.WithTimeout(reqCtx, timeout)
 	}
 
 	req, err := gutils.NewReusableRequest(reqCtx,
