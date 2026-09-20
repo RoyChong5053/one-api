@@ -16,6 +16,8 @@
       "quota_per_unit_desc": "货币显示的转换比率。值越高，每 1 美元代表的配额越多。",
       "retry_times": "重试次数",
       "retry_times_desc": "上游请求出现瞬时错误时的自动重试次数。",
+      "fanout_min_batch_size": "扇出最小批量",
+      "fanout_min_batch_size_desc": "触发多通道并行扇出的最小条目数（embedding 文本或 rerank 文档数量）。",
       "save": "保存通用设置",
       "title": "通用设置",
       "top_up_link": "充值链接",

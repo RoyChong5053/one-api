@@ -16,6 +16,8 @@
       "quota_per_unit_desc": "通貨表示用の換算レートです。値が大きいほど 1 ドルあたりのクォータが増えます。",
       "retry_times": "再試行回数",
       "retry_times_desc": "上流リクエストで一時的なエラーが発生した際の自動再試行回数です。",
+      "fanout_min_batch_size": "ファンアウト最小バッチサイズ",
+      "fanout_min_batch_size_desc": "リクエストを複数チャネルに分割して並列処理する前の最小件数（embeddingテキストまたはrerankドキュメント数）。",
       "save": "一般設定を保存",
       "title": "一般設定",
       "top_up_link": "チャージリンク",

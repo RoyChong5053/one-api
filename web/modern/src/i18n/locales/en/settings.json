@@ -16,6 +16,8 @@
       "quota_per_unit_desc": "Conversion ratio for currency display. Higher value makes each $ represent more quota.",
       "retry_times": "Retry Times",
       "retry_times_desc": "Automatic retry attempts for upstream requests on transient errors.",
+      "fanout_min_batch_size": "Fan-out Min Batch Size",
+      "fanout_min_batch_size_desc": "Minimum number of embedding texts or rerank documents before a request is split across multiple channels for parallel processing.",
       "save": "Save General Settings",
       "title": "General Settings",
       "top_up_link": "Top-up Link",

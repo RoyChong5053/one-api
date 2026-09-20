@@ -41,6 +41,8 @@ export const useChannelForm = () => {
   const [allEndpoints, setAllEndpoints] = useState<EndpointInfo[]>([]);
   const [formInitialized, setFormInitialized] = useState(!isEdit);
   const [loadedChannelType, setLoadedChannelType] = useState<number | null>(null);
+  const [channelStatus, setChannelStatus] = useState<number | null>(null);
+  const [isTogglingStatus, setIsTogglingStatus] = useState(false);
   // State for channel type change confirmation dialog
   const [pendingTypeChange, setPendingTypeChange] = useState<{
     fromType: number;
@@ -291,6 +293,7 @@ export const useChannelForm = () => {
         }
 
         setLoadedChannelType(channelType);
+        setChannelStatus(toInt(data.status, 1));
         reset(formData);
         await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -727,6 +730,40 @@ export const useChannelForm = () => {
     setPendingSaveConfirmation(null);
   }, []);
 
+  // Toggle enable/disable without leaving the edit page. Uses status_only
+  // update to avoid overwriting other fields (same API as the list page).
+  const toggleChannelStatus = async () => {
+    if (!channelId || channelStatus === null || isTogglingStatus) return;
+    const nextStatus = channelStatus === 1 ? 2 : 1;
+    try {
+      setIsTogglingStatus(true);
+      const res = await api.put('/api/channel/?status_only=1', {
+        id: parseInt(channelId, 10),
+        status: nextStatus,
+      });
+      if (!res.data?.success) {
+        throw new Error(res.data?.message || 'Failed to update channel status.');
+      }
+      setChannelStatus(nextStatus);
+      notify({
+        type: 'success',
+        title: tr('status.success_title', 'Success'),
+        message:
+          nextStatus === 1
+            ? tr('status.enabled_message', 'Channel enabled.')
+            : tr('status.disabled_message', 'Channel disabled.'),
+      });
+    } catch (error) {
+      notify({
+        type: 'error',
+        title: tr('status.failed_title', 'Update failed'),
+        message: error instanceof Error ? error.message : tr('status.failed_message', 'Failed to update channel status.'),
+      });
+    } finally {
+      setIsTogglingStatus(false);
+    }
+  };
+
   const testChannel = async () => {
     if (!channelId) return;
 
@@ -783,6 +820,9 @@ export const useChannelForm = () => {
     watchTooling,
     onSubmit,
     testChannel,
+    channelStatus,
+    isTogglingStatus,
+    toggleChannelStatus,
     tr,
     notify,
     // Type change handling

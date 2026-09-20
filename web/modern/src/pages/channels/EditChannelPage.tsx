@@ -38,6 +38,9 @@ export function EditChannelPage() {
     watchType,
     onSubmit,
     testChannel,
+    channelStatus,
+    isTogglingStatus,
+    toggleChannelStatus,
     tr,
     notify,
     // Type change handling
@@ -196,6 +199,21 @@ export function EditChannelPage() {
                   {isEdit && (
                     <Button type="button" variant="secondary" onClick={testChannel} disabled={isSubmitting} className="w-full sm:w-auto">
                       {tr('actions.test_channel', 'Test Channel')}
+                    </Button>
+                  )}
+                  {isEdit && channelStatus !== null && (
+                    <Button
+                      type="button"
+                      variant={channelStatus === 1 ? 'outline' : 'default'}
+                      onClick={toggleChannelStatus}
+                      disabled={isSubmitting || isTogglingStatus}
+                      className="w-full sm:w-auto"
+                    >
+                      {isTogglingStatus
+                        ? tr('actions.toggling_status', 'Updating...')
+                        : channelStatus === 1
+                          ? tr('actions.disable', 'Disable')
+                          : tr('actions.enable', 'Enable')}
                     </Button>
                   )}
                   <Button type="submit" disabled={isSubmitting} className="w-full sm:w-auto">

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/Laisky/errors/v2"
 	gmw "github.com/Laisky/gin-middlewares/v7"
@@ -48,10 +49,15 @@ type fanoutRerankResultItem struct {
 
 // fanOutEmbeddingResult holds the result from a single channel's embedding sub-request.
 type fanOutEmbeddingResult struct {
-	offset int                      // start index in the original input array
+	offset int // start index in the original input array
 	data   []openai.EmbeddingResponseItem
 	usage  relaymodel.Usage
 	err    error
+	// observability fields, filled in by the fan-out dispatcher (not the adaptor)
+	channelId   int
+	channelName string
+	docCount    int
+	latencyMs   int64
 }
 
 // FanOutEmbeddingResponse is the merged embedding response from fan-out.
@@ -109,7 +115,12 @@ func TryFanOutEmbedding(
 		wg.Add(1)
 		go func(idx int, channel *model.Channel) {
 			defer wg.Done()
+			start := time.Now()
 			results[idx] = fanOutEmbeddingSingle(nil, c, meta, channel, textRequest, splits[idx].items, splits[idx].offset)
+			results[idx].channelId = channel.Id
+			results[idx].channelName = channel.Name
+			results[idx].docCount = len(splits[idx].items)
+			results[idx].latencyMs = time.Since(start).Milliseconds()
 		}(i, ch)
 	}
 	wg.Wait()
@@ -120,9 +131,18 @@ func TryFanOutEmbedding(
 	for _, r := range results {
 		if r.err != nil {
 			lg.Warn("embedding fan-out sub-request failed, using partial results",
+				zap.Int("channel_id", r.channelId),
+				zap.String("channel_name", r.channelName),
+				zap.Int("doc_count", r.docCount),
+				zap.Int64("latency_ms", r.latencyMs),
 				zap.Error(r.err))
 			continue
 		}
+		lg.Info("embedding fan-out sub-request completed",
+			zap.Int("channel_id", r.channelId),
+			zap.String("channel_name", r.channelName),
+			zap.Int("doc_count", r.docCount),
+			zap.Int64("latency_ms", r.latencyMs))
 		successful = append(successful, r)
 	}
 	if len(successful) == 0 {
@@ -317,6 +337,11 @@ type fanOutRerankResult struct {
 	results []fanoutRerankResultItem
 	usage   relaymodel.Usage
 	err     error
+	// observability fields, filled in by the fan-out dispatcher (not the adaptor)
+	channelId   int
+	channelName string
+	docCount    int
+	latencyMs   int64
 }
 
 // FanOutRerankResponse is the merged rerank response from fan-out.
@@ -368,7 +393,12 @@ func TryFanOutRerank(
 		wg.Add(1)
 		go func(idx int, channel *model.Channel) {
 			defer wg.Done()
+			start := time.Now()
 			results[idx] = fanOutRerankSingle(nil, c, meta, channel, rerankRequest, docSplits[idx].items, docSplits[idx].offset)
+			results[idx].channelId = channel.Id
+			results[idx].channelName = channel.Name
+			results[idx].docCount = len(docSplits[idx].items)
+			results[idx].latencyMs = time.Since(start).Milliseconds()
 		}(i, ch)
 	}
 	wg.Wait()
@@ -379,9 +409,18 @@ func TryFanOutRerank(
 	for _, r := range results {
 		if r.err != nil {
 			lg.Warn("rerank fan-out sub-request failed, using partial results",
+				zap.Int("channel_id", r.channelId),
+				zap.String("channel_name", r.channelName),
+				zap.Int("doc_count", r.docCount),
+				zap.Int64("latency_ms", r.latencyMs),
 				zap.Error(r.err))
 			continue
 		}
+		lg.Info("rerank fan-out sub-request completed",
+			zap.Int("channel_id", r.channelId),
+			zap.String("channel_name", r.channelName),
+			zap.Int("doc_count", r.docCount),
+			zap.Int64("latency_ms", r.latencyMs))
 		successful = append(successful, r)
 	}
 	if len(successful) == 0 {

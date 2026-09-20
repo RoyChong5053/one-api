@@ -16,6 +16,8 @@
       "quota_per_unit_desc": "Relación de conversión para mostrar valores en moneda. Un valor más alto hace que cada $ represente más cuota.",
       "retry_times": "Reintentos",
       "retry_times_desc": "Número de reintentos automáticos para solicitudes aguas arriba ante errores transitorios.",
+      "fanout_min_batch_size": "Tamaño mínimo de lote de fan-out",
+      "fanout_min_batch_size_desc": "Número mínimo de textos de embedding o documentos de rerank antes de dividir una solicitud entre varios canales para procesamiento paralelo.",
       "save": "Guardar ajustes generales",
       "title": "Ajustes generales",
       "top_up_link": "Enlace de recarga",

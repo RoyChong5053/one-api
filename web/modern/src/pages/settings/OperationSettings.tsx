@@ -27,6 +27,7 @@ const operationSchema = z.object({
   QuotaPerUnit: z.number().min(0).default(500000),
   ChannelDisableThreshold: z.number().min(0).default(0),
   RetryTimes: z.number().min(0).default(0),
+  FanOutMinBatchSize: z.number().min(1).default(10),
   AutomaticDisableChannelEnabled: z.boolean().default(false),
   AutomaticEnableChannelEnabled: z.boolean().default(false),
   LogConsumeEnabled: z.boolean().default(false),
@@ -89,6 +90,7 @@ export function OperationSettings() {
       ChatLink: t('operation_settings.general.chat_link_desc'),
       QuotaPerUnit: t('operation_settings.general.quota_per_unit_desc'),
       RetryTimes: t('operation_settings.general.retry_times_desc'),
+      FanOutMinBatchSize: t('operation_settings.general.fanout_min_batch_size_desc'),
       LogConsumeEnabled: t('operation_settings.general.log_consume_enabled_desc'),
       DisplayInCurrencyEnabled: t('operation_settings.general.display_in_currency_desc'),
       DisplayTokenStatEnabled: t('operation_settings.general.display_token_stat_desc'),
@@ -116,6 +118,7 @@ export function OperationSettings() {
       QuotaPerUnit: 500000,
       ChannelDisableThreshold: 0,
       RetryTimes: 0,
+      FanOutMinBatchSize: 10,
       AutomaticDisableChannelEnabled: false,
       AutomaticEnableChannelEnabled: false,
       LogConsumeEnabled: false,
@@ -192,6 +195,7 @@ export function OperationSettings() {
           await persistOption('ChatLink', values.ChatLink);
           await persistOption('QuotaPerUnit', values.QuotaPerUnit);
           await persistOption('RetryTimes', values.RetryTimes);
+          await persistOption('FanOutMinBatchSize', values.FanOutMinBatchSize);
           break;
         case 'monitor':
           await persistOption('QuotaRemindThreshold', values.QuotaRemindThreshold);
@@ -534,6 +538,32 @@ export function OperationSettings() {
                       </FormLabel>
                       <FormControl>
                         <Input type="number" {...field} onChange={(e) => field.onChange(Number(e.target.value))} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="FanOutMinBatchSize"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel className="flex items-center gap-2">
+                        {t('operation_settings.general.fanout_min_batch_size')}
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button type="button" className="text-muted-foreground hover:text-foreground" aria-label={t('common.info')}>
+                              <Info className="h-4 w-4" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" align="start" className="max-w-[320px]">
+                            {descriptions.FanOutMinBatchSize}
+                          </TooltipContent>
+                        </Tooltip>
+                      </FormLabel>
+                      <FormControl>
+                        <Input type="number" min={1} {...field} onChange={(e) => field.onChange(Number(e.target.value))} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>

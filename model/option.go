@@ -90,6 +90,7 @@ func InitOptionMap() {
 	config.OptionMap["ChatLink"] = config.ChatLink
 	config.OptionMap["QuotaPerUnit"] = strconv.FormatFloat(config.QuotaPerUnit, 'f', -1, 64)
 	config.OptionMap["RetryTimes"] = strconv.Itoa(config.RetryTimes)
+	config.OptionMap["FanOutMinBatchSize"] = strconv.Itoa(config.FanOutMinBatchSize)
 	config.OptionMap["Theme"] = config.Theme
 	config.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
@@ -253,6 +254,10 @@ func updateOptionMap(key string, value string) (err error) {
 		config.PreConsumedQuota, _ = strconv.ParseInt(value, 10, 64)
 	case "RetryTimes":
 		config.RetryTimes, _ = strconv.Atoi(value)
+	case "FanOutMinBatchSize":
+		if intValue, err := strconv.Atoi(value); err == nil && intValue > 0 {
+			config.FanOutMinBatchSize = intValue
+		}
 	case "ModelRatio", "CompletionRatio":
 		// Skip deprecated global pricing options - they are now handled by individual adapters
 		return nil

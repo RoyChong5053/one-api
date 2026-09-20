@@ -16,6 +16,8 @@
       "quota_per_unit_desc": "Ratio de conversion pour l'affichage en devise. Plus la valeur est élevée, plus 1 $ représente de quota.",
       "retry_times": "Nombre de tentatives",
       "retry_times_desc": "Nombre de tentatives automatiques pour les requêtes amont en cas d'erreurs transitoires.",
+      "fanout_min_batch_size": "Taille minimale de lot (fan-out)",
+      "fanout_min_batch_size_desc": "Nombre minimal de textes d'embedding ou de documents de rerank avant de répartir une requête sur plusieurs canaux pour un traitement parallèle.",
       "save": "Enregistrer les paramètres généraux",
       "title": "Paramètres généraux",
       "top_up_link": "Lien de recharge",
