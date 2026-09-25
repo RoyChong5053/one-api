@@ -19,6 +19,7 @@ import (
 	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/monitor"
 	"github.com/Laisky/one-api/relay"
 	"github.com/Laisky/one-api/relay/adaptor"
 	"github.com/Laisky/one-api/relay/adaptor/openai"
@@ -38,6 +39,45 @@ func fanOutMinBatchSize() int {
 		return config.FanOutMinBatchSize
 	}
 	return defaultFanOutMinBatchSize
+}
+
+// fanoutBackoffDuration mirrors the non-auth branch of the relay circuit
+// breaker: base * multiplier^(failures-1), capped at max. Keeps fan-out
+// sub-request failures on the same suspension schedule as single-channel
+// relay errors so an offline node is skipped within minutes, not hours.
+func fanoutBackoffDuration(channelId int) time.Duration {
+	failures := model.GetConsecutiveChannelFailures(channelId)
+	if failures < 1 {
+		failures = 1
+	}
+	duration := config.ChannelSuspendBackoffBase
+	for i := 1; i < failures; i++ {
+		duration *= time.Duration(config.ChannelSuspendBackoffMultiplier)
+		if duration >= config.ChannelSuspendBackoffMax {
+			return config.ChannelSuspendBackoffMax
+		}
+	}
+	return duration
+}
+
+// reportFanoutSubRequest feeds one fan-out sub-request outcome back into the
+// channel health system. Previously fan-out failures were only logged, so an
+// offline node kept receiving slices on every request (full tail latency each
+// time). Now a failure suspends the ability (fast circuit breaker) and a
+// success resets the consecutive-failure counter.
+func reportFanoutSubRequest(ctx context.Context, group, modelName string, channelId int, err error) {
+	if channelId == 0 {
+		return
+	}
+	if err != nil {
+		monitor.Emit(channelId, false)
+		backoff := fanoutBackoffDuration(channelId)
+		_ = model.SuspendAbility(ctx, group, modelName, channelId, backoff)
+		return
+	}
+	monitor.Emit(channelId, true)
+	model.RecordChannelSuccess(channelId)
+	model.ResetConsecutiveChannelFailures(channelId)
 }
 
 // fanoutRerankResultItem mirrors the rerank result structure for fan-out merging.
@@ -127,8 +167,12 @@ func TryFanOutEmbedding(
 
 	// Use results from successful sub-requests even if some failed; only fall
 	// back to the single-channel path when every sub-request failed.
+	// Each outcome is reported to the circuit breaker so an offline node is
+	// suspended instead of receiving slices on every request.
+	reportCtx := gmw.Ctx(c)
 	var successful []fanOutEmbeddingResult
 	for _, r := range results {
+		reportFanoutSubRequest(reportCtx, group, modelName, r.channelId, r.err)
 		if r.err != nil {
 			lg.Warn("embedding fan-out sub-request failed, using partial results",
 				zap.Int("channel_id", r.channelId),
@@ -405,8 +449,12 @@ func TryFanOutRerank(
 
 	// Keep results from successful sub-requests even if some failed; only fall
 	// back to the single-channel path when every sub-request failed.
+	// Each outcome is reported to the circuit breaker so an offline node is
+	// suspended instead of receiving slices on every request.
+	reportCtx := gmw.Ctx(c)
 	var successful []fanOutRerankResult
 	for _, r := range results {
+		reportFanoutSubRequest(reportCtx, group, modelName, r.channelId, r.err)
 		if r.err != nil {
 			lg.Warn("rerank fan-out sub-request failed, using partial results",
 				zap.Int("channel_id", r.channelId),
