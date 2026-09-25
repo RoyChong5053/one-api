@@ -621,6 +621,22 @@ func getStreamingToolCalls(c *gin.Context, candidate *ChatCandidate) []model.Too
 	return toolCalls
 }
 
+// mapGeminiFinishReason converts Gemini's finishReason into the OpenAI-compatible
+// finish_reason value so downstream clients can detect truncation (length) or
+// content filtering instead of always seeing a clean "stop".
+func mapGeminiFinishReasonToOpenAI(reason string) string {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "", "STOP":
+		return constant.StopFinishReason
+	case "MAX_TOKENS":
+		return "length"
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY":
+		return "content_filter"
+	default:
+		return constant.StopFinishReason
+	}
+}
+
 func responseGeminiChat2OpenAI(c *gin.Context, response *ChatResponse) *openai.TextResponse {
 	fullTextResponse := openai.TextResponse{
 		Id:      tracing.GenerateChatCompletionID(c),
@@ -634,12 +650,13 @@ func responseGeminiChat2OpenAI(c *gin.Context, response *ChatResponse) *openai.T
 			Message: model.Message{
 				Role: "assistant",
 			},
-			FinishReason: constant.StopFinishReason,
+			FinishReason: mapGeminiFinishReasonToOpenAI(candidate.FinishReason),
 		}
 
 		toolCalls := getToolCalls(c, &candidate)
 		if len(toolCalls) > 0 {
 			choice.Message.ToolCalls = toolCalls
+			choice.FinishReason = "tool_calls"
 		}
 
 		if len(candidate.Content.Parts) > 0 {
@@ -690,7 +707,7 @@ func responseGeminiChat2OpenAI(c *gin.Context, response *ChatResponse) *openai.T
 			}
 		} else {
 			choice.Message.Content = ""
-			choice.FinishReason = candidate.FinishReason
+			choice.FinishReason = mapGeminiFinishReasonToOpenAI(candidate.FinishReason)
 		}
 
 		fullTextResponse.Choices = append(fullTextResponse.Choices, choice)
@@ -710,12 +727,16 @@ func streamResponseGeminiChat2OpenAI(c *gin.Context, geminiResponse *ChatRespons
 	// Get the first candidate
 	candidate := geminiResponse.Candidates[0]
 
-	// Check if there are parts in the content
-	if len(candidate.Content.Parts) == 0 {
-		return nil
+	// Surface Gemini's finish reason so clients can distinguish a natural stop
+	// from MAX_TOKENS / SAFETY truncation. Previously this was dropped entirely,
+	// so every streamed reply looked like a clean "stop".
+	if candidate.FinishReason != "" {
+		finishReason := mapGeminiFinishReasonToOpenAI(candidate.FinishReason)
+		choice.FinishReason = &finishReason
 	}
 
-	// Handle different content types in the parts
+	// Handle different content types in the parts. A final chunk may carry only
+	// finishReason (and/or usage) with no parts, so we must not return nil here.
 	for _, part := range candidate.Content.Parts {
 		// Handle text content
 		if part.Text != "" {
@@ -775,6 +796,14 @@ func streamResponseGeminiChat2OpenAI(c *gin.Context, geminiResponse *ChatRespons
 	response.Object = "chat.completion.chunk"
 	response.Model = "gemini"
 	response.Choices = []openai.ChatCompletionsStreamResponseChoice{choice}
+	if geminiResponse.UsageMetadata != nil && geminiResponse.UsageMetadata.TotalTokenCount > 0 {
+		response.Usage = &model.Usage{
+			PromptTokens: geminiResponse.UsageMetadata.PromptTokenCount,
+			CompletionTokens: geminiResponse.UsageMetadata.CandidatesTokenCount +
+				geminiResponse.UsageMetadata.ThoughtsTokenCount,
+			TotalTokens: geminiResponse.UsageMetadata.TotalTokenCount,
+		}
+	}
 
 	return &response
 }

@@ -1644,6 +1644,7 @@ func TestStreamResponseGeminiChat2OpenAI_EmptyParts(t *testing.T) {
 		name        string
 		response    ChatResponse
 		expectedNil bool
+		wantFinish  string
 	}{
 		{
 			name: "no candidates should return nil",
@@ -1653,7 +1654,7 @@ func TestStreamResponseGeminiChat2OpenAI_EmptyParts(t *testing.T) {
 			expectedNil: true,
 		},
 		{
-			name: "candidate with empty parts should return nil",
+			name: "candidate with empty parts still emits terminal finish_reason",
 			response: ChatResponse{
 				Candidates: []ChatCandidate{
 					{
@@ -1665,7 +1666,24 @@ func TestStreamResponseGeminiChat2OpenAI_EmptyParts(t *testing.T) {
 					},
 				},
 			},
-			expectedNil: true,
+			expectedNil: false,
+			wantFinish:  "stop",
+		},
+		{
+			name: "MAX_TOKENS maps to length even without parts",
+			response: ChatResponse{
+				Candidates: []ChatCandidate{
+					{
+						Content: ChatContent{
+							Role:  "model",
+							Parts: []Part{},
+						},
+						FinishReason: "MAX_TOKENS",
+					},
+				},
+			},
+			expectedNil: false,
+			wantFinish:  "length",
 		},
 		{
 			name: "candidate with text part should return response",
@@ -1700,6 +1718,11 @@ func TestStreamResponseGeminiChat2OpenAI_EmptyParts(t *testing.T) {
 				require.Nil(t, result, "expected nil response for edge case")
 			} else {
 				require.NotNil(t, result, "expected non-nil response")
+			}
+			if tt.wantFinish != "" {
+				require.Len(t, result.Choices, 1)
+				require.NotNil(t, result.Choices[0].FinishReason)
+				require.Equal(t, tt.wantFinish, *result.Choices[0].FinishReason)
 			}
 		})
 	}
