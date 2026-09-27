@@ -675,28 +675,17 @@ func CacheGetSatisfiedChannel(group string, model string, preferLowestPriority b
 		}
 	}
 
-	var idx int
+	var channel *Channel
 	if preferLowestPriority && endIdx < len(candidateChannels) {
-		idx = random.RandRange(endIdx, len(candidateChannels))
+		idx := random.RandRange(endIdx, len(candidateChannels))
+		channel = candidateChannels[idx]
 	} else {
-		idx = rand.Intn(endIdx)
-		if preferLowestPriority {
-			// All channels have the same highest priority, or only one priority level exists.
-			// If preferLowestPriority is true, and we only have one priority level,
-			// it means we cannot satisfy preferLowestPriority.
-			// This case might indicate no lower-priority channels exist.
-			// Depending on desired behavior, could return error or pick from existing.
-			// For now, let's assume it means "pick any if only one priority level".
-			// If truly no other channel to pick, the random selection will pick from current set.
-			// This part of logic might need refinement based on precise meaning of preferLowestPriority
-			// when only one priority tier exists.
-			// The original code implies if endIdx == len(channels), it picks from 0 to endIdx-1.
-			// If endIdx < len(channels), it picks from endIdx to len(channels)-1.
-			// So if preferLowestPriority is true and all are same priority, it will still pick from them.
-			// This seems okay.
-		}
+		// Same-priority tier uses health-weighted selection (Weight *
+		// healthScore) so a weight=10 CPU node takes ~10x the single-path
+		// traffic of weight=1 instead of uniform rand.Intn. Mirrors
+		// CacheGetSatisfiedChannelExcluding/selectByHealthWeight.
+		channel = selectByHealthWeight(candidateChannels[:endIdx], model)
 	}
-	channel := candidateChannels[idx]
 	logger.Logger.Info("select channel in cache", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
 	return channel, nil
 }

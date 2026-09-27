@@ -754,6 +754,24 @@ var (
 	// Default: 10
 	FanOutMinBatchSize = env.Int("FAN_OUT_MIN_BATCH_SIZE", 10)
 
+	// FanOutMaxShard caps texts per fan-out sub-request. Weight-proportional
+	// splits can still hand a weak CPU node 16-24 texts (e.g. weight 10/17 of
+	// a 32-batch), which OOMs/hangs llama.cpp. Larger shards are processed as
+	// sequential sub-batches on the same channel, preserving input order.
+	//
+	// Environment variable: FAN_OUT_MAX_SHARD
+	// Default: 8
+	FanOutMaxShard = env.Int("FAN_OUT_MAX_SHARD", 8)
+
+	// EmbeddingTimeout bounds embedding upstream requests separately from the
+	// general RelayTimeout. CPU-only llama.cpp nodes need tens of seconds per
+	// shard; 0 falls back to RelayTimeout.
+	//
+	// Environment variable: EMBEDDING_TIMEOUT
+	// Default: 120
+	// Unit: seconds
+	EmbeddingTimeout = env.Int("EMBEDDING_TIMEOUT", 120)
+
 	// IdleTimeout controls how long to keep streaming connections alive without
 	// traffic before closing them. Prevents connection leaks from stalled streams.
 	//

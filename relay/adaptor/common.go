@@ -88,12 +88,18 @@ func DoRequestHelper(a Adaptor, c *gin.Context, meta *meta.Meta, requestBody io.
 	}
 
 	// Apply a per-request context deadline so that different relay modes can use
-	// different upstream timeouts. Rerank (which may run many documents on slow
-	// CPU-only devices) uses RerankTimeout; everything else uses RelayTimeout.
+	// different upstream timeouts. Rerank and embedding (many docs on slow
+	// CPU-only llama.cpp nodes) use their own timeouts; everything else uses
+	// RelayTimeout. EmbeddingTimeout=0 falls back to RelayTimeout.
 	reqCtx := gmw.Ctx(c)
 	var timeout time.Duration
 	if meta != nil && meta.Mode == relaymode.Rerank {
 		timeout = time.Duration(config.RerankTimeout) * time.Second
+	} else if meta != nil && meta.Mode == relaymode.Embeddings {
+		timeout = time.Duration(config.EmbeddingTimeout) * time.Second
+		if timeout <= 0 {
+			timeout = time.Duration(config.RelayTimeout) * time.Second
+		}
 	} else {
 		timeout = time.Duration(config.RelayTimeout) * time.Second
 	}

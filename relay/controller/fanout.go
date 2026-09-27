@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -39,6 +40,17 @@ func fanOutMinBatchSize() int {
 		return config.FanOutMinBatchSize
 	}
 	return defaultFanOutMinBatchSize
+}
+
+// fanOutMaxShard caps texts per upstream POST. Weight-proportional splits can
+// hand one CPU node 16-24 texts; llama.cpp encodes serially, so a giant shard
+// hangs the whole fan-out on tail latency and suspends every channel at once.
+// Larger shards are sent as sequential sub-batches on the same channel.
+func fanOutMaxShard() int {
+	if config.FanOutMaxShard > 0 {
+		return config.FanOutMaxShard
+	}
+	return 8
 }
 
 // fanoutBackoffDuration mirrors the non-auth branch of the relay circuit
@@ -140,12 +152,28 @@ func TryFanOutEmbedding(
 	}
 
 	lg := gmw.GetLogger(c)
-	lg.Info("embedding fan-out triggered",
-		zap.Int("input_size", len(inputs)),
-		zap.Int("channels", len(candidateChannels)))
 
 	// Split inputs across channels proportionally by weight
 	splits := splitInputsByWeight(inputs, candidateChannels)
+	var shardSummary []string
+	var maxShardSize int
+	for i, ch := range candidateChannels {
+		w := ch.GetWeight()
+		n := 0
+		if i < len(splits) {
+			n = len(splits[i].items)
+		}
+		if n > maxShardSize {
+			maxShardSize = n
+		}
+		shardSummary = append(shardSummary, ch.Name+":"+strconv.Itoa(n)+"x"+strconv.Itoa(int(w)))
+	}
+	lg.Info("embedding fan-out triggered",
+		zap.Int("input_size", len(inputs)),
+		zap.Int("channels", len(candidateChannels)),
+		zap.Int("max_shard", maxShardSize),
+		zap.Int("max_shard_cap", fanOutMaxShard()),
+		zap.Strings("shards", shardSummary))
 
 	// Fan-out: send sub-requests in parallel
 	results := make([]fanOutEmbeddingResult, len(candidateChannels))
@@ -205,6 +233,10 @@ func TryFanOutEmbedding(
 }
 
 // fanOutEmbeddingSingle sends an embedding sub-request to a single channel.
+// Order-preserving: texts larger than fanOutMaxShard are sent as sequential
+// sub-batches on the SAME channel and re-based to the shard offset, so vector
+// order never depends on which channel answered first (unlike rerank, which
+// globally re-sorts by score and tolerates partial failure).
 func fanOutEmbeddingSingle(
 	_ context.Context,
 	originalCtx *gin.Context,
@@ -218,62 +250,89 @@ func fanOutEmbeddingSingle(
 		return fanOutEmbeddingResult{offset: offset}
 	}
 
-	// Build a sub-request with the sliced input
-	subRequest := *origRequest
-	subRequest.Input = texts
-
-	// Create a meta clone for this channel
-	subMeta := metalib.CloneMeta(origMeta, channel)
-
-	// Create adaptor and build request
-	adaptorImpl := relay.GetAdaptor(subMeta.APIType)
-	if adaptorImpl == nil {
-		return fanOutEmbeddingResult{
-			err: errors.Errorf("invalid api type: %d", subMeta.APIType),
+	maxShard := fanOutMaxShard()
+	var allData []openai.EmbeddingResponseItem
+	var totalUsage relaymodel.Usage
+	for start := 0; start < len(texts); start += maxShard {
+		end := start + maxShard
+		if end > len(texts) {
+			end = len(texts)
 		}
-	}
-	adaptorImpl.Init(subMeta)
+		chunk := texts[start:end]
 
-	// Convert request
-	converted, err := adaptorImpl.ConvertRequest(originalCtx, relaymode.Embeddings, &subRequest)
-	if err != nil {
-		return fanOutEmbeddingResult{err: errors.Wrap(err, "convert request")}
-	}
+		// Build a sub-request with the sliced input
+		subRequest := *origRequest
+		subRequest.Input = chunk
 
-	bodyBytes, err := json.Marshal(converted)
-	if err != nil {
-		return fanOutEmbeddingResult{err: errors.Wrap(err, "marshal request")}
-	}
+		// Create a meta clone for this channel
+		subMeta := metalib.CloneMeta(origMeta, channel)
 
-	// Send request to upstream
-	resp, err := adaptorImpl.DoRequest(originalCtx, subMeta, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		return fanOutEmbeddingResult{err: errors.Wrap(err, "do request")}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fanOutEmbeddingResult{
-			err: errors.Errorf("upstream returned status %d: %s", resp.StatusCode, string(body)),
+		// Create adaptor and build request
+		adaptorImpl := relay.GetAdaptor(subMeta.APIType)
+		if adaptorImpl == nil {
+			return fanOutEmbeddingResult{
+				err: errors.Errorf("invalid api type: %d", subMeta.APIType),
+			}
 		}
-	}
+		adaptorImpl.Init(subMeta)
 
-	// Parse response
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fanOutEmbeddingResult{err: errors.Wrap(err, "read response")}
-	}
+		// Convert request
+		converted, err := adaptorImpl.ConvertRequest(originalCtx, relaymode.Embeddings, &subRequest)
+		if err != nil {
+			return fanOutEmbeddingResult{err: errors.Wrap(err, "convert request")}
+		}
 
-	var embeddingResp openai.EmbeddingResponse
-	if err := json.Unmarshal(respBody, &embeddingResp); err != nil {
-		return fanOutEmbeddingResult{err: errors.Wrap(err, "unmarshal response")}
+		bodyBytes, err := json.Marshal(converted)
+		if err != nil {
+			return fanOutEmbeddingResult{err: errors.Wrap(err, "marshal request")}
+		}
+
+		// Send request to upstream
+		resp, err := adaptorImpl.DoRequest(originalCtx, subMeta, bytes.NewBuffer(bodyBytes))
+		if err != nil {
+			return fanOutEmbeddingResult{err: errors.Wrapf(err, "do request (sub-batch %d:%d of %d)", start, end, len(texts))}
+		}
+
+		func() {
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				err = errors.Errorf("upstream returned status %d: %s", resp.StatusCode, string(body))
+				return
+			}
+
+			// Parse response
+			var respBody []byte
+			respBody, err = io.ReadAll(resp.Body)
+			if err != nil {
+				err = errors.Wrap(err, "read response")
+				return
+			}
+
+			var embeddingResp openai.EmbeddingResponse
+			if err = json.Unmarshal(respBody, &embeddingResp); err != nil {
+				err = errors.Wrap(err, "unmarshal response")
+				return
+			}
+			// Re-base chunk-relative indices to shard-relative so the
+			// outer merge (offset + Index) restores global input order.
+			for i := range embeddingResp.Data {
+				embeddingResp.Data[i].Index += start
+			}
+			allData = append(allData, embeddingResp.Data...)
+			totalUsage.PromptTokens += embeddingResp.Usage.PromptTokens
+			totalUsage.CompletionTokens += embeddingResp.Usage.CompletionTokens
+			totalUsage.TotalTokens += embeddingResp.Usage.TotalTokens
+		}()
+		if err != nil {
+			return fanOutEmbeddingResult{err: err}
+		}
 	}
 
 	return fanOutEmbeddingResult{
 		offset: offset,
-		data:   embeddingResp.Data,
-		usage:  embeddingResp.Usage,
+		data:   allData,
+		usage:  totalUsage,
 	}
 }
 
