@@ -86,6 +86,12 @@ const (
 	// Set by: adaptors that parse image outputs (e.g., Gemini inlineData).
 	// Read in: controllers to apply per-image billing for image-capable models.
 	OutputImageCount = "output_image_count"
+	// GeminiStreamUsage stashes the last usageMetadata-derived Usage observed during
+	// a Gemini streaming response (*relay/model.Usage).
+	// Set by: relay/adaptor/gemini StreamHandler when a chunk carries usageMetadata.
+	// Read in: gemini DoResponse so stream billing/logs use the provider's true
+	// counts instead of the local pre-count fallback.
+	GeminiStreamUsage = "gemini_stream_usage"
 	// OutputAudioSeconds stores the total output audio duration in seconds for billing.
 	// Set by: adaptors that parse output audio payloads (e.g., base64 audio responses).
 	// Read in: controllers to apply per-second audio billing when output audio is produced.

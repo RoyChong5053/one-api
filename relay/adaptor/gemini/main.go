@@ -907,9 +907,23 @@ func recordGeminiOutputImageCount(c *gin.Context, count int) {
 	c.Set(ctxkey.OutputImageCount, count)
 }
 
+// streamCutErrorType is the machine-readable error type emitted as a terminal
+// SSE event when a Gemini stream ends without ever carrying usageMetadata.
+// Google always attaches usageMetadata to a cleanly finished stream, so its
+// absence means the provider cut the stream mid-flight. Downstream clients
+// (e.g. TavernLab) use this to trigger a single silent retry instead of
+// showing a truncated reply as a clean stop.
+const streamCutErrorType = "upstream_cut"
+
 // StreamHandler processes streaming responses from the Gemini API and converts them to OpenAI-compatible
 // Server-Sent Events (SSE) format. It reads the response body line by line, unmarshals each chunk,
 // converts it to OpenAI format, and streams it to the client.
+// While relaying it records per-stream observability (relayed/skipped chunk
+// counts, whether usageMetadata was ever seen) and stashes the last
+// usageMetadata-derived Usage in the Gin context for DoResponse, so stream
+// billing/logs use the provider's true counts. A stream that ends without
+// usageMetadata gets an explicit terminal upstream_cut error event instead of
+// a silent [DONE].
 // Returns an error if the response processing fails, and the accumulated response text on success.
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, string) {
 	lg := gmw.GetLogger(c)
@@ -917,6 +931,11 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 	outputImageCount := 0
 	inlineImageCount := 0
 	fileImageCount := 0
+	chunksRelayed := 0
+	chunksSkipped := 0
+	renderErrs := 0
+	sawUsage := false
+	var lastUsage *model.Usage
 	lineReader := commonsse.NewLineReader(resp.Body, commonsse.DefaultLineBufferSize)
 
 	common.SetEventStreamHeaders(c)
@@ -957,12 +976,32 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		data = strings.TrimPrefix(data, "data: ")
 		data = strings.TrimSuffix(data, "\"")
 
+		// A bare [DONE] is a clean client-side terminator (some tests and
+		// gateways emit it); stop without treating it as a parse failure.
+		if data == "[DONE]" {
+			break
+		}
+
 		var geminiResponse ChatResponse
 		err = json.Unmarshal([]byte(data), &geminiResponse)
 		if err != nil {
+			chunksSkipped++
 			lg.Error("error unmarshalling stream response",
 				zap.Error(errors.Wrap(err, "unmarshal stream")))
 			continue
+		}
+
+		// Capture provider usage whenever present, independent of whether the
+		// chunk converts to a relayable event (a final usage-only chunk must
+		// still count as "usage seen", otherwise every clean finish would
+		// look like a cut).
+		if md := geminiResponse.UsageMetadata; md != nil && md.TotalTokenCount > 0 {
+			sawUsage = true
+			lastUsage = &model.Usage{
+				PromptTokens:     md.PromptTokenCount,
+				CompletionTokens: md.CandidatesTokenCount + md.ThoughtsTokenCount,
+				TotalTokens:      md.TotalTokenCount,
+			}
 		}
 
 		chunkCounts := countGeminiOutputImages(&geminiResponse)
@@ -972,19 +1011,55 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 
 		response := streamResponseGeminiChat2OpenAI(c, &geminiResponse)
 		if response == nil {
+			chunksSkipped++
 			continue
 		}
 
 		responseText += response.Choices[0].Delta.StringContent()
+		chunksRelayed++
 
 		err = render.ObjectData(c, response)
 		if err != nil {
+			renderErrs++
 			lg.Error("error rendering stream",
 				zap.Error(errors.Wrap(err, "render stream")))
 		}
 	}
 	if streamErr != nil {
 		render.LogHeartbeatLineReaderError(c, lg, errors.Wrap(streamErr, "line reader stream"), hbr)
+	}
+
+	if lastUsage != nil {
+		c.Set(ctxkey.GeminiStreamUsage, lastUsage)
+	}
+
+	// A stream that ends without usageMetadata was cut by the provider: Google
+	// attaches usageMetadata to every cleanly finished stream. Emit an
+	// explicit terminal error so downstream clients can retry instead of
+	// mistaking the partial reply for a clean stop.
+	cut := streamErr != nil || !sawUsage
+	streamFields := []zap.Field{
+		zap.Int("chunks_relayed", chunksRelayed),
+		zap.Int("chunks_skipped", chunksSkipped),
+		zap.Int("render_errors", renderErrs),
+		zap.Bool("saw_usage", sawUsage),
+		zap.Bool("cut", cut),
+		zap.Int("text_len", len(responseText)),
+	}
+	if cut {
+		cutPayload := map[string]any{"error": map[string]any{
+			"message": "upstream stream ended without usage metadata (suspected provider cut)",
+			"type":    streamCutErrorType,
+			"code":    streamCutErrorType,
+		}}
+		if rerr := render.ObjectData(c, cutPayload); rerr != nil {
+			renderErrs++
+			lg.Error("error rendering stream cut signal",
+				zap.Error(errors.Wrap(rerr, "render stream cut")))
+		}
+		lg.Warn("gemini stream cut detected", streamFields...)
+	} else {
+		lg.Debug("gemini stream done", streamFields...)
 	}
 
 	if outputImageCount > 0 {

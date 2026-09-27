@@ -254,6 +254,21 @@ func (a *Adaptor) DoRequest(c *gin.Context, meta *meta.Meta, requestBody io.Read
 	return channelhelper.DoRequestHelper(a, c, meta, requestBody)
 }
 
+// streamUsageOrFallback returns the usageMetadata-derived Usage stashed by
+// StreamHandler when the provider sent usage, so stream billing/logs use
+// Google's true counts. Without provider usage it falls back to the local
+// pre-count + reply estimate (ResponseText2Usage), preserving old behavior.
+func streamUsageOrFallback(c *gin.Context, responseText, modelName string, promptTokens int) *model.Usage {
+	if c != nil {
+		if raw, ok := c.Get(ctxkey.GeminiStreamUsage); ok {
+			if u, ok := raw.(*model.Usage); ok && u != nil && u.TotalTokens > 0 {
+				return u
+			}
+		}
+	}
+	return openai.ResponseText2Usage(responseText, modelName, promptTokens)
+}
+
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (usage *model.Usage, err *model.ErrorWithStatusCode) {
 	// Handle Claude Messages response conversion
 	if isClaudeConversion, exists := c.Get(ctxkey.ClaudeMessagesConversion); exists && isClaudeConversion.(bool) {
@@ -274,7 +289,7 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *meta.Met
 	if meta.IsStream {
 		var responseText string
 		err, responseText = StreamHandler(c, resp)
-		usage = openai.ResponseText2Usage(responseText, meta.ActualModelName, meta.PromptTokens)
+		usage = streamUsageOrFallback(c, responseText, meta.ActualModelName, meta.PromptTokens)
 	} else {
 		switch meta.Mode {
 		case relaymode.Embeddings:

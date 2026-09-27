@@ -1772,3 +1772,116 @@ func TestGetToolCalls_MultipleFunctionCalls(t *testing.T) {
 	require.Equal(t, "search_news", toolCalls[1].Function.Name)
 	require.Contains(t, toolCalls[1].Function.Arguments, "weather")
 }
+
+// TestStreamHandler_StashesProviderUsage verifies a clean stream (content
+// chunks + final usageMetadata chunk) stashes Google-true usage in the Gin
+// context and emits NO upstream_cut terminal event.
+func TestStreamHandler_StashesProviderUsage(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	textChunk := ChatResponse{
+		Candidates: []ChatCandidate{{
+			Content: ChatContent{Parts: []Part{{Text: "hello"}}},
+		}},
+	}
+	finalChunk := ChatResponse{
+		Candidates: []ChatCandidate{{
+			FinishReason: "STOP",
+			Content:      ChatContent{Parts: []Part{}},
+		}},
+		UsageMetadata: &UsageMetadata{
+			PromptTokenCount:     12950,
+			CandidatesTokenCount: 1400,
+			ThoughtsTokenCount:   59,
+			TotalTokenCount:      14409,
+		},
+	}
+	mustChunk := func(v ChatResponse) string {
+		b, err := json.Marshal(v)
+		require.NoError(t, err)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := mustChunk(textChunk) + mustChunk(finalChunk)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}
+
+	apiErr, responseText := StreamHandler(c, resp)
+	require.Nil(t, apiErr)
+	require.Equal(t, "hello", responseText)
+
+	raw, ok := c.Get(ctxkey.GeminiStreamUsage)
+	require.True(t, ok, "expected stashed stream usage")
+	u, ok := raw.(*model.Usage)
+	require.True(t, ok)
+	require.Equal(t, 12950, u.PromptTokens)
+	require.Equal(t, 1459, u.CompletionTokens)
+	require.Equal(t, 14409, u.TotalTokens)
+
+	body := recorder.Body.String()
+	require.NotContains(t, body, streamCutErrorType)
+	require.Contains(t, body, `"finish_reason":"stop"`)
+}
+
+// TestStreamHandler_EmitsCutSignal verifies a stream that ends without ever
+// carrying usageMetadata (provider cut) emits an explicit upstream_cut
+// terminal error event and stashes no usage.
+func TestStreamHandler_EmitsCutSignal(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	textChunk := ChatResponse{
+		Candidates: []ChatCandidate{{
+			Content: ChatContent{Parts: []Part{{Text: "half reply"}}},
+		}},
+	}
+	b, err := json.Marshal(textChunk)
+	require.NoError(t, err)
+	sse := "data: " + string(b) + "\n\n"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}
+
+	apiErr, responseText := StreamHandler(c, resp)
+	require.Nil(t, apiErr)
+	require.Equal(t, "half reply", responseText)
+
+	_, ok := c.Get(ctxkey.GeminiStreamUsage)
+	require.False(t, ok, "cut stream must not stash usage")
+
+	body := recorder.Body.String()
+	require.Contains(t, body, `"type":"upstream_cut"`)
+	require.Contains(t, body, "[DONE]")
+}
+
+// TestStreamUsageOrFallback verifies DoResponse's stream usage prefers the
+// stashed provider usage and falls back to local counting otherwise.
+func TestStreamUsageOrFallback(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	stashed := &model.Usage{PromptTokens: 12950, CompletionTokens: 1459, TotalTokens: 14409}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Set(ctxkey.GeminiStreamUsage, stashed)
+	u := streamUsageOrFallback(c, "hello", "gemini-3.7-flash", 18379)
+	require.Equal(t, 12950, u.PromptTokens)
+	require.Equal(t, 1459, u.CompletionTokens)
+
+	recorder2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(recorder2)
+	u2 := streamUsageOrFallback(c2, "hello", "gemini-3.7-flash", 18379)
+	require.Equal(t, 18379, u2.PromptTokens)
+	require.Greater(t, u2.CompletionTokens, 0)
+}
