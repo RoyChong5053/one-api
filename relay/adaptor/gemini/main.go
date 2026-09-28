@@ -908,11 +908,12 @@ func recordGeminiOutputImageCount(c *gin.Context, count int) {
 }
 
 // streamCutErrorType is the machine-readable error type emitted as a terminal
-// SSE event when a Gemini stream ends without ever carrying usageMetadata.
-// Google always attaches usageMetadata to a cleanly finished stream, so its
-// absence means the provider cut the stream mid-flight. Downstream clients
-// (e.g. TavernLab) use this to trigger a single silent retry instead of
-// showing a truncated reply as a clean stop.
+// SSE event when a Gemini stream ends without ever carrying a terminal
+// candidate.FinishReason. usageMetadata is not a valid signal (Google attaches
+// it to nearly every chunk), whereas the terminal FinishReason proves the
+// provider completed the turn. Downstream clients (e.g. TavernLab) use this to
+// trigger a single silent retry instead of showing a truncated reply as a
+// clean stop.
 const streamCutErrorType = "upstream_cut"
 
 // StreamHandler processes streaming responses from the Gemini API and converts them to OpenAI-compatible
@@ -921,9 +922,9 @@ const streamCutErrorType = "upstream_cut"
 // While relaying it records per-stream observability (relayed/skipped chunk
 // counts, whether usageMetadata was ever seen) and stashes the last
 // usageMetadata-derived Usage in the Gin context for DoResponse, so stream
-// billing/logs use the provider's true counts. A stream that ends without
-// usageMetadata gets an explicit terminal upstream_cut error event instead of
-// a silent [DONE].
+// billing/logs use the provider's true counts. A stream that ends without a
+// terminal candidate.FinishReason gets an explicit terminal upstream_cut error
+// event instead of a silent [DONE].
 // Returns an error if the response processing fails, and the accumulated response text on success.
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, string) {
 	lg := gmw.GetLogger(c)
@@ -935,6 +936,12 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 	chunksSkipped := 0
 	renderErrs := 0
 	sawUsage := false
+	// sawFinish distinguishes a clean provider stop from a mid-flight cut.
+	// usageMetadata is NOT a valid signal: Google attaches it to (nearly) every
+	// streamed chunk, so a stream cut after chunk 1 still "saw usage". Only the
+	// terminal candidate.FinishReason (STOP / MAX_TOKENS / SAFETY / …) proves
+	// the provider finished the turn.
+	sawFinish := false
 	var lastUsage *model.Usage
 	lineReader := commonsse.NewLineReader(resp.Body, commonsse.DefaultLineBufferSize)
 
@@ -1004,6 +1011,10 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 			}
 		}
 
+		if len(geminiResponse.Candidates) > 0 && geminiResponse.Candidates[0].FinishReason != "" {
+			sawFinish = true
+		}
+
 		chunkCounts := countGeminiOutputImages(&geminiResponse)
 		outputImageCount += chunkCounts.Total
 		inlineImageCount += chunkCounts.Inline
@@ -1033,22 +1044,25 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		c.Set(ctxkey.GeminiStreamUsage, lastUsage)
 	}
 
-	// A stream that ends without usageMetadata was cut by the provider: Google
-	// attaches usageMetadata to every cleanly finished stream. Emit an
-	// explicit terminal error so downstream clients can retry instead of
-	// mistaking the partial reply for a clean stop.
-	cut := streamErr != nil || !sawUsage
+	// A stream that ends without ever carrying a terminal candidate.FinishReason
+	// was cut by the provider. usageMetadata is deliberately NOT used as the
+	// signal: Google attaches it to (nearly) every streamed chunk, so relying on
+	// it made every mid-flight cut look like a clean finish. Emit an explicit
+	// terminal error so downstream clients can retry instead of mistaking the
+	// partial reply for a clean stop.
+	cut := streamErr != nil || !sawFinish
 	streamFields := []zap.Field{
 		zap.Int("chunks_relayed", chunksRelayed),
 		zap.Int("chunks_skipped", chunksSkipped),
 		zap.Int("render_errors", renderErrs),
 		zap.Bool("saw_usage", sawUsage),
+		zap.Bool("saw_finish", sawFinish),
 		zap.Bool("cut", cut),
 		zap.Int("text_len", len(responseText)),
 	}
 	if cut {
 		cutPayload := map[string]any{"error": map[string]any{
-			"message": "upstream stream ended without usage metadata (suspected provider cut)",
+			"message": "upstream stream ended without a terminal finish_reason (suspected provider cut)",
 			"type":    streamCutErrorType,
 			"code":    streamCutErrorType,
 		}}

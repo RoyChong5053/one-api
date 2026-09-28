@@ -1865,6 +1865,50 @@ func TestStreamHandler_EmitsCutSignal(t *testing.T) {
 	require.Contains(t, body, "[DONE]")
 }
 
+// TestStreamHandler_CutDespiteUsageMetadata is the regression test for the
+// 2026-09-28 truncation: Gemini attaches usageMetadata to (nearly) every
+// streamed chunk, so a stream cut after the first chunk still carries usage.
+// Usage presence must NOT be mistaken for a clean finish — only a terminal
+// candidate.FinishReason counts. Without the fix this emitted no upstream_cut
+// and downstream clients persisted a 4-character partial as a clean stop.
+func TestStreamHandler_CutDespiteUsageMetadata(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	// A content chunk with cumulative usage, exactly like the real Gemini
+	// stream. It is the only chunk: the provider cut right after it. There is no
+	// chunk carrying a candidate.FinishReason.
+	cutChunk := ChatResponse{
+		Candidates: []ChatCandidate{{
+			Content: ChatContent{Parts: []Part{{Text: "（*听到"}}},
+		}},
+		UsageMetadata: &UsageMetadata{
+			PromptTokenCount:     13379,
+			CandidatesTokenCount: 4,
+			ThoughtsTokenCount:   1244,
+			TotalTokenCount:      14627,
+		},
+	}
+	b, err := json.Marshal(cutChunk)
+	require.NoError(t, err)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader("data: " + string(b) + "\n\n")),
+	}
+
+	apiErr, responseText := StreamHandler(c, resp)
+	require.Nil(t, apiErr)
+	require.Equal(t, "（*听到", responseText)
+
+	body := recorder.Body.String()
+	require.Contains(t, body, `"type":"upstream_cut"`, "usage without a finish_reason must be reported as a cut")
+	require.Contains(t, body, "[DONE]")
+}
+
 // TestStreamUsageOrFallback verifies DoResponse's stream usage prefers the
 // stashed provider usage and falls back to local counting otherwise.
 func TestStreamUsageOrFallback(t *testing.T) {
