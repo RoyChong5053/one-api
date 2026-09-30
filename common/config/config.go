@@ -733,6 +733,50 @@ var (
 	// Recommended: 300 for most use cases
 	RelayTimeout = env.Int("RELAY_TIMEOUT", 0)
 
+	// BufferedStreamModels lists client-facing model names (comma-separated,
+	// case-insensitive) whose streaming responses are fully buffered before
+	// anything is written to the client. A provider that returns HTTP 200 but
+	// ends the stream without a terminal finish_reason ("stream cut", common on
+	// free/rate-limited tiers and in tool-calling/agent workloads) can then be
+	// treated as a retryable failure, so the relay falls back to another channel
+	// within the same request instead of surfacing a truncated reply.
+	// Trade-off: these models lose incremental streaming (time-to-first-token).
+	//
+	// Matched against both the requested (origin) model name and the mapped
+	// (actual) model name, so aliases like "auto-agent" work.
+	//
+	// Environment variable: BUFFERED_STREAM_MODELS
+	// Default: "" (disabled)
+	// Example: "auto-agent,auto-gemini"
+	BufferedStreamModels = splitCSVLower(strings.TrimSpace(env.String("BUFFERED_STREAM_MODELS", "")))
+
+	// BufferedStreamMaxBytes caps how much of a buffered streaming response is
+	// held in memory. Once exceeded, the relay flushes what it has and streams
+	// the remainder directly (degrading to normal behavior; such a response can
+	// no longer be retried within the request).
+	//
+	// Environment variable: BUFFERED_STREAM_MAX_BYTES
+	// Default: 8388608 (8 MiB)
+	BufferedStreamMaxBytes = env.Int("BUFFERED_STREAM_MAX_BYTES", 8*1024*1024)
+
+	// BufferedStreamMaxWaitSec bounds how long a buffered stream may be held
+	// before it is force-flushed to the client. Guards against indefinite
+	// buffering of a slow upstream.
+	//
+	// Environment variable: BUFFERED_STREAM_MAX_WAIT_SEC
+	// Default: 600 (10 minutes)
+	// Unit: seconds
+	BufferedStreamMaxWaitSec = env.Int("BUFFERED_STREAM_MAX_WAIT_SEC", 600)
+
+	// StreamCutDisableThreshold is the number of consecutive upstream stream
+	// cuts after which a channel is auto-disabled. The periodic auto-disabled
+	// channel health test re-enables it once it passes. Set <= 0 to suspend the
+	// ability only (never auto-disable) on stream cuts.
+	//
+	// Environment variable: STREAM_CUT_DISABLE_THRESHOLD
+	// Default: 3
+	StreamCutDisableThreshold = env.Int("STREAM_CUT_DISABLE_THRESHOLD", 3)
+
 	// RerankTimeout bounds rerank upstream requests separately from the general
 	// RelayTimeout. Reranking many documents on CPU-only devices can take several
 	// minutes, so a longer (or disabled) timeout is useful while keeping a tight
@@ -1733,4 +1777,41 @@ func IsLogConsumeEnabled() bool {
 // Can be called at runtime to enable/disable logging without restart.
 func SetLogConsumeEnabled(enabled bool) {
 	logConsumeEnabled.Store(enabled)
+}
+
+// splitCSVLower splits a comma-separated list, trimming surrounding whitespace
+// from each entry, lowercasing it, and dropping empties. It is used to parse
+// case-insensitive name allowlists from environment variables.
+func splitCSVLower(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// IsBufferedStreamModel reports whether streaming responses for the given model
+// name should be fully buffered before being sent to the client. Matching is
+// case-insensitive. It is backed by BUFFERED_STREAM_MODELS.
+func IsBufferedStreamModel(model string) bool {
+	if len(BufferedStreamModels) == 0 {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(model))
+	if name == "" {
+		return false
+	}
+	for _, candidate := range BufferedStreamModels {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
 }

@@ -225,9 +225,24 @@ func Relay(c *gin.Context) {
 	failedChannels := make(map[int]bool)
 	failedChannels[lastFailedChannelId] = true
 
+	// If any part of the response has already been committed to the client,
+	// retrying on another channel would append a second response onto the same
+	// stream. This happens when a buffered stream degrades to pass-through
+	// (size/time cap) or when an adaptor streamed before failing. In that case
+	// the failure has already been recorded and the channel suspended above;
+	// skip cross-channel retry to avoid corrupting the client's stream.
+	responseCommitted := c.Writer.Written()
+	if responseCommitted {
+		lg.Warn("response already committed to client; skipping cross-channel retry to avoid stream corruption",
+			zap.Int("channel_id", channelId),
+			zap.Int("status_code", bizErr.StatusCode),
+			zap.String("request_id", requestId),
+		)
+	}
+
 	// Automatically calculate retry count from available channels when
 	// ChannelRetryExhaustAll is enabled or RetryTimes is zero.
-	if config.ChannelRetryExhaustAll || retryTimes <= 0 {
+	if !responseCommitted && (config.ChannelRetryExhaustAll || retryTimes <= 0) {
 		// Try in-memory cache first; fall back to DB query if cache is disabled or empty.
 		channels, err := dbmodel.GetChannelsFromCache(group, originalModel)
 		if err != nil || len(channels) <= 1 {
@@ -285,7 +300,7 @@ func Relay(c *gin.Context) {
 	failedProviderTypes := make(map[int]bool)
 	failedProviderTypes[c.GetInt(ctxkey.Channel)] = true
 
-	for i := retryTimes; i > 0; i-- {
+	for i := retryTimes; i > 0 && !responseCommitted; i-- {
 		var channel *dbmodel.Channel
 		var err error
 
@@ -389,7 +404,7 @@ func Relay(c *gin.Context) {
 
 		channelId = c.GetInt(ctxkey.ChannelId)
 		dbmodel.RecordChannelFailure(channelId)
-		failedChannels[channelId] = true // Track this failed channel
+		failedChannels[channelId] = true                     // Track this failed channel
 		failedProviderTypes[c.GetInt(ctxkey.Channel)] = true // Track this failed provider
 		lastFailedChannelId = channelId
 
@@ -525,6 +540,21 @@ func classifyRetryableUpstreamClientError(relayErr *model.ErrorWithStatusCode) (
 	}
 
 	return false, ""
+}
+
+// isStreamCutRelayError reports whether the relay error represents a
+// provider-side stream cut (HTTP 200 stream ended without a terminal
+// finish_reason). The buffered-stream path surfaces this as an upstream_cut
+// error so the relay can retry another channel and, after repeated cuts,
+// auto-disable the offending channel.
+func isStreamCutRelayError(err *model.ErrorWithStatusCode) bool {
+	if err == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(fmt.Sprint(err.Code)), "upstream_cut") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Message), "upstream_cut")
 }
 
 // isClientContextCancel returns true if the error is caused by the caller's context
@@ -959,6 +989,27 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 				)...,
 			)
 		}
+
+		// Repeated provider-side stream cuts indicate a persistently unreliable
+		// channel for streaming/agent traffic. Auto-disable it so channel
+		// selection routes around it; the periodic auto_disabled channel test
+		// re-enables it once it passes. Other 5xx errors stay transient (suspend
+		// only) to avoid disabling healthy channels on one-off upstream blips.
+		if isStreamCutRelayError(&params.Err) && config.StreamCutDisableThreshold > 0 {
+			consecutiveFailures := dbmodel.GetConsecutiveChannelFailures(params.ChannelId)
+			if consecutiveFailures >= config.StreamCutDisableThreshold {
+				lg.Error("channel disabled due to repeated upstream stream cuts",
+					appendRelayFailureFields(params,
+						zap.Int("consecutive_failures", consecutiveFailures),
+						zap.Int("disable_threshold", config.StreamCutDisableThreshold),
+						zap.String("disable_rationale", "repeated stream cuts indicate an unreliable streaming channel"),
+					)...,
+				)
+				monitor.DisableChannel(params.ChannelId, params.ChannelName,
+					fmt.Sprintf("repeated upstream stream cuts (%d consecutive)", consecutiveFailures))
+			}
+		}
+
 		// Do not immediately auto-disable; transient
 		monitor.Emit(params.ChannelId, false)
 		return

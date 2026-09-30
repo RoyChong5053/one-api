@@ -359,7 +359,41 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 
 	// do response
 	c.Set(ctxkey.SkipAdaptorResponseBodyLog, true)
+
+	// For configured buffered-stream models, hold the whole SSE response in
+	// memory before writing anything to the client. This lets a provider-side
+	// stream cut (HTTP 200 but no terminal finish_reason) be turned into a
+	// retryable failure so the relay falls back to another channel within the
+	// same request. See stream_buffer.go.
+	origWriter := c.Writer
+	var streamBuf *streamBufferWriter
+	if shouldBufferStream(c, meta) {
+		streamBuf = newStreamBufferWriter(origWriter,
+			config.BufferedStreamMaxBytes,
+			time.Duration(config.BufferedStreamMaxWaitSec)*time.Second)
+		c.Writer = streamBuf
+	}
+
 	usage, respErr := requestAdaptor.DoResponse(c, resp, meta)
+
+	if streamBuf != nil {
+		c.Writer = origWriter
+		outcome, cut, committed := streamBuf.Settle(respErr != nil)
+		if cut && !committed {
+			lg.Warn("buffered upstream stream cut detected; discarding partial response to allow fallback",
+				zap.String("model", meta.ActualModelName),
+				zap.String("origin_model", meta.OriginModelName),
+				zap.Int("channel_id", meta.ChannelId),
+				zap.Int("chunks", outcome.Chunks),
+				zap.Bool("saw_finish", outcome.SawFinish),
+				zap.Bool("upstream_cut_event", outcome.UpstreamCut),
+				zap.Bool("has_tool_call", outcome.HasToolCall),
+			)
+			usage = nil
+			respErr = newStreamCutError(meta)
+		}
+	}
+
 	if upstreamCapture != nil {
 		logUpstreamResponseFromCapture(lg, resp, upstreamCapture, "chat_completions")
 	} else {
