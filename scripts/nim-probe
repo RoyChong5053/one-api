@@ -14,9 +14,15 @@ NIM 的 GET /v1/models 是静态全量清单（无鉴权也返回），不代表
   ./scripts/nim-probe --json scripts/nim-probe-report.json --save-list scripts/nim-models-latest.txt
   ./scripts/nim-probe --baseline scripts/nim-probe-report.json   # 与上次结果做增量对比
 
+  服务器上密钥在 one-api 数据库里、.env 没写 NVIDIA_API_KEY 时，直接复用它
+  （只读 SQLite，不复制密钥，也不打印明文）：
+  ./scripts/nim-probe --from-db
+  ./scripts/nim-probe --from-db --channel-id 14     # 指定用哪个 channel 的 key
+  ./scripts/nim-probe --list-db-channels           # 先看本机配了哪些 NIM key
+
 退出码: 0 = 至少有一个可用模型, 1 = 没有, 2 = 参数/环境错误
 
-密钥读取顺序: --api-key > $NVIDIA_API_KEY > 项目根 .env > 交互输入。
+密钥读取顺序: --api-key > --from-db > $NVIDIA_API_KEY > 项目根 .env > 交互输入。
 任何情况下都不会把密钥打印到终端或写进报告文件（只留末 4 位指纹）。
 
 零依赖，仅用 Python 3.8+ 标准库。
@@ -108,6 +114,8 @@ def read_env_file(path=ENV_FILE):
 def resolve_key(args):
     if args.api_key:
         return args.api_key.strip()
+    if args.from_db:
+        return key_from_db(args)
     env_key = os.environ.get("NVIDIA_API_KEY", "").strip()
     if env_key:
         return env_key
@@ -117,12 +125,120 @@ def resolve_key(args):
             return file_key
     if not sys.stdin.isatty():
         raise SystemExit(
-            "未找到 NVIDIA_API_KEY。请 export NVIDIA_API_KEY=... 或写入 %s" % ENV_FILE
+            "未找到 NVIDIA_API_KEY。请 export NVIDIA_API_KEY=... 、写入 %s，"
+            "或用 --from-db 直接复用 one-api 数据库里已配置的 NIM key" % ENV_FILE
         )
     entered = getpass.getpass("NVIDIA API Key (不回显): ").strip()
     if not entered:
         raise SystemExit("未提供 API key，退出。")
     return entered
+
+
+# ------------------------------------------------- 从 one-api 数据库复用 key
+
+NIM_HOST_HINT = "nvidia.com"
+CHANNEL_STATUS = {0: "unknown", 1: "enabled", 2: "manual-disabled", 3: "auto-disabled"}
+
+
+def db_path(args):
+    if args.db:
+        return args.db
+    if os.path.exists(ENV_FILE):
+        configured = read_env_file().get("SQLITE_PATH", "").strip()
+        if configured:
+            if not os.path.isabs(configured):
+                configured = os.path.join(PROJECT_ROOT, configured)
+            if os.path.exists(configured):
+                return configured
+    return os.path.join(PROJECT_ROOT, "data", "one-api.db")
+
+
+def db_query(path, sql, params=()):
+    """只读查询 one-api 的 SQLite，绝不写入正在被服务占用的库。"""
+    import sqlite3
+
+    if not os.path.exists(path):
+        raise SystemExit("找不到 one-api 数据库: %s（可用 --db 指定）" % path)
+    conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+
+def db_nim_channels(args):
+    rows = db_query(
+        db_path(args),
+        "SELECT id, name, status, key, base_url FROM channels "
+        "WHERE COALESCE(base_url, '') LIKE ? AND COALESCE(key, '') != '' ORDER BY id",
+        ("%" + NIM_HOST_HINT + "%",),
+    )
+    return rows
+
+
+def list_db_channels(args):
+    """列出本机 one-api 里配置的所有 NIM channel（只显示密钥指纹）。"""
+    rows = db_nim_channels(args)
+    log("数据库: %s" % db_path(args))
+    if not rows:
+        log("没有找到 base_url 含 %s 的 channel。" % NIM_HOST_HINT)
+        return 0
+    log("%-5s %-40s %-16s %-10s %s" % ("id", "name", "status", "keys", "指纹"))
+    for row in rows:
+        keys = [k.strip() for k in row["key"].split(",") if k.strip()]
+        fingerprints = ",".join(sorted({key_fingerprint(k) for k in keys}))
+        log(
+            "%-5s %-40s %-16s %-10d %s"
+            % (
+                row["id"],
+                (row["name"] or "")[:40],
+                CHANNEL_STATUS.get(row["status"], str(row["status"])),
+                len(keys),
+                fingerprints,
+            )
+        )
+    distinct = {k.strip() for row in rows for k in row["key"].split(",") if k.strip()}
+    log("")
+    if len(distinct) > 1:
+        log(paint_hint("警告: 这些 channel 用了 %d 个不同的 NIM key，账号权限/额度可能不一致。" % len(distinct)))
+    else:
+        log("所有 NIM channel 共用同一个 key。")
+    return 0
+
+
+def paint_hint(text):
+    return "\033[35m%s\033[0m" % text if sys.stdout.isatty() else text
+
+
+def key_from_db(args):
+    """复用 one-api channels 表里已配置的 NIM key（不复制、不打印明文）。"""
+    rows = db_nim_channels(args)
+    if args.channel_id:
+        rows = [row for row in rows if row["id"] == args.channel_id]
+        if not rows:
+            raise SystemExit("channel %s 不是 NIM channel，或没有配置 key。" % args.channel_id)
+    if not rows:
+        raise SystemExit(
+            "数据库里没有 base_url 含 %s 且带 key 的 channel。" % NIM_HOST_HINT
+        )
+
+    distinct = {k.strip() for row in rows for k in row["key"].split(",") if k.strip()}
+    if len(distinct) > 1:
+        log(
+            paint_hint(
+                "提示: %d 个 NIM channel 用了 %d 个不同的 key，本次只用 channel #%s 的。"
+                % (len(rows), len(distinct), rows[0]["id"])
+            )
+        )
+
+    row = rows[0]
+    keys = [k.strip() for k in row["key"].split(",") if k.strip()]
+    vlog(
+        "复用 channel #%s %s (status=%s, %d 个 key)"
+        % (row["id"], row["name"], CHANNEL_STATUS.get(row["status"], "?"), len(keys))
+    )
+    return keys[0]
 
 
 # ---------------------------------------------------------------- HTTP 封装
@@ -576,6 +692,18 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--api-key", help="覆盖 $NVIDIA_API_KEY / .env 中的密钥")
+    parser.add_argument(
+        "--from-db",
+        action="store_true",
+        help="复用 one-api 数据库 channels 表里已配置的 NIM key（只读，不复制密钥）",
+    )
+    parser.add_argument("--db", help="指定 SQLite 路径，默认读 .env 的 SQLITE_PATH")
+    parser.add_argument("--channel-id", type=int, help="配合 --from-db 指定用哪个 channel 的 key")
+    parser.add_argument(
+        "--list-db-channels",
+        action="store_true",
+        help="列出本机 one-api 里所有 NIM channel 及密钥指纹（不发推理请求）",
+    )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="默认 %(default)s")
     parser.add_argument("-i", "--include", help="只探测 ID 匹配该正则的模型")
     parser.add_argument("-e", "--exclude", help="排除 ID 匹配该正则的模型")
@@ -617,6 +745,9 @@ def main(argv=None):
         raise SystemExit("--timeout 必须为正数")
 
     paint = Painter(sys.stdout.isatty())
+
+    if args.list_db_channels:
+        return list_db_channels(args)
 
     if args.list_only:
         ids = fetch_model_list(args.base_url, None, args.timeout, args.retries)
