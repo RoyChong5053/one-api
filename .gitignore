@@ -32,3 +32,8 @@ docs/requirements/observability.md
 /.claude/
 one-api.db-shm
 one-api.db-wal
+
+# scripts/nim-probe 探测报告
+scripts/nim-probe-report*.json
+scripts/nim-probe-report*.csv
+scripts/nim-models-*.txt

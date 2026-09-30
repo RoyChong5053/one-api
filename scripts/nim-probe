@@ -1,0 +1,751 @@
+#!/usr/bin/env python3
+"""nim-probe — 探测 NVIDIA NIM (integrate.api.nvidia.com) 当前账号真正可用的模型。
+
+NIM 的 GET /v1/models 是静态全量清单（无鉴权也返回），不代表你的账号能用；
+真正可用性只能靠发一次极小的推理请求来判定。本脚本并发探测清单里每个模型，
+并把响应分类成可执行的状态码，方便定期复测看 NVIDIA 上下线了什么。
+
+用法:
+  ./scripts/nim-probe                       # 全量探测
+  ./scripts/nim-probe --list-only           # 只拉清单，不发推理请求
+  ./scripts/nim-probe -i 'nemotron|gemma'   # 只探测匹配正则的模型
+  ./scripts/nim-probe -e 'palmyra|yi-large' # 排除匹配正则的模型
+  ./scripts/nim-probe -c 8 --timeout 120    # 调并发 / 超时（大 MoE 首 token 可能 >60s）
+  ./scripts/nim-probe --json scripts/nim-probe-report.json --save-list scripts/nim-models-latest.txt
+  ./scripts/nim-probe --baseline scripts/nim-probe-report.json   # 与上次结果做增量对比
+
+退出码: 0 = 至少有一个可用模型, 1 = 没有, 2 = 参数/环境错误
+
+密钥读取顺序: --api-key > $NVIDIA_API_KEY > 项目根 .env > 交互输入。
+任何情况下都不会把密钥打印到终端或写进报告文件（只留末 4 位指纹）。
+
+零依赖，仅用 Python 3.8+ 标准库。
+"""
+
+import argparse
+import concurrent.futures as futures
+import csv
+import getpass
+import json
+import os
+import random
+import re
+import socket
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
+
+# 状态分类: (状态, 中文含义, 是否算"可用")
+STATUS_META = {
+    "ok": ("可用", True),
+    "ok_slow": ("可用(慢)", True),
+    "eol": ("已下线(410)", False),
+    "account_denied": ("账号不可用(404)", False),
+    "unknown": ("清单里没有这个模型(404)", False),
+    "non_chat": ("非对话端点模型", False),
+    "rate_limited": ("被限流(429)", None),
+    "server_error": ("服务端错误(5xx)", None),
+    "timeout": ("超时", None),
+    "auth_failed": ("密钥无权限(403)", None),
+    "error": ("其他错误", None),
+}
+STATUS_ORDER = list(STATUS_META)
+
+_print_lock = threading.Lock()
+VERBOSE = False
+
+
+def log(msg):
+    with _print_lock:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+
+
+def vlog(msg):
+    if VERBOSE:
+        log(msg)
+
+
+# ---------------------------------------------------------------- 密钥处理
+
+
+def key_fingerprint(key):
+    if not key:
+        return "(none)"
+    tail = key[-4:] if len(key) >= 4 else key
+    return "****%s" % tail
+
+
+def read_env_file(path=ENV_FILE):
+    """极简 .env 解析: KEY=VALUE, 忽略注释/空行/export 前缀/引号。"""
+    values = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise SystemExit("读取 %s 失败: %s" % (path, exc))
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip()
+        if name.startswith("export "):
+            name = name[len("export "):].strip()
+        value = value.strip().strip("'\"")
+        if name:
+            values[name] = value
+    return values
+
+
+def resolve_key(args):
+    if args.api_key:
+        return args.api_key.strip()
+    env_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    if os.path.exists(ENV_FILE):
+        file_key = read_env_file().get("NVIDIA_API_KEY", "").strip()
+        if file_key:
+            return file_key
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "未找到 NVIDIA_API_KEY。请 export NVIDIA_API_KEY=... 或写入 %s" % ENV_FILE
+        )
+    entered = getpass.getpass("NVIDIA API Key (不回显): ").strip()
+    if not entered:
+        raise SystemExit("未提供 API key，退出。")
+    return entered
+
+
+# ---------------------------------------------------------------- HTTP 封装
+
+
+class HttpResult:
+    __slots__ = ("status", "body", "elapsed_ms", "error")
+
+    def __init__(self, status=None, body="", elapsed_ms=0, error=None):
+        self.status = status
+        self.body = body
+        self.elapsed_ms = elapsed_ms
+        self.error = error
+
+    @property
+    def ok(self):
+        return self.status is not None and 200 <= self.status < 300
+
+    def json(self):
+        try:
+            return json.loads(self.body)
+        except (ValueError, TypeError):
+            return None
+
+
+def http_post_json(url, payload, key, timeout):
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Authorization", "Bearer %s" % key)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    return _do_request(req, timeout)
+
+
+def http_get_json(url, key, timeout):
+    req = urllib.request.Request(url, method="GET")
+    if key:
+        req.add_header("Authorization", "Bearer %s" % key)
+    req.add_header("Accept", "application/json")
+    return _do_request(req, timeout)
+
+
+def _do_request(req, timeout):
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            return HttpResult(
+                status=resp.status,
+                body=body,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - body 读不出来不影响分类
+            body = ""
+        return HttpResult(
+            status=exc.code,
+            body=body,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+    except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        return HttpResult(
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            error=str(reason) or exc.__class__.__name__,
+        )
+
+
+def retryable(result):
+    """429 / 5xx / 网络错误值得重试；4xx 与成功不重试。"""
+    if result.status is None:
+        return True
+    return result.status == 429 or result.status >= 500
+
+
+def post_with_retry(url, payload, key, args, kind):
+    """对 429/5xx/超时做指数退避重试，返回最后一次 HttpResult。"""
+    result = HttpResult(status=0, error="not attempted")
+    for attempt in range(args.retries + 1):
+        result = http_post_json(url, payload, key, args.timeout)
+        vlog("    %s try#%d -> HTTP %s %s" % (kind, attempt + 1, result.status, result.error or ""))
+        if not retryable(result) or attempt >= args.retries:
+            return result
+        time.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.5))
+    return result
+
+
+# ---------------------------------------------------------------- 结果分类
+
+
+def detail_of(result):
+    """从响应体里抽一句人话 detail。"""
+    if result.error:
+        return result.error
+    payload = result.json()
+    if isinstance(payload, dict):
+        for field in ("detail", "message", "error"):
+            value = payload.get(field)
+            if isinstance(value, str) and value:
+                return value
+            if isinstance(value, dict):
+                inner = value.get("message") or value.get("detail")
+                if isinstance(inner, str) and inner:
+                    return inner
+    text = (result.body or "").strip().replace("\n", " ")
+    return text[:160] if text else "HTTP %s" % result.status
+
+
+EOL_RE = re.compile(r"end of life on ([0-9T:\-]+Z?)", re.IGNORECASE)
+
+
+def classify(result):
+    """把一次 HTTP 结果映射成 (status, detail)。"""
+    if result.error is not None and result.status is None:
+        lowered = result.error.lower()
+        if "timed out" in lowered or "timeout" in lowered:
+            return "timeout", result.error
+        return "error", result.error
+
+    code = result.status
+    if code is None:
+        return "error", "无响应"
+    if 200 <= code < 300:
+        return "ok", ""
+    if code == 403:
+        return "auth_failed", detail_of(result)
+    if code == 429:
+        return "rate_limited", detail_of(result)
+    if code == 410:
+        detail = detail_of(result)
+        found = EOL_RE.search(detail)
+        if found:
+            detail = "%s (EOL %s)" % (detail, found.group(1))
+        return "eol", detail
+    if code >= 500:
+        return "server_error", detail_of(result)
+    if code == 404:
+        detail = detail_of(result)
+        lowered = detail.lower()
+        if "not found for account" in lowered or "for account" in lowered:
+            return "account_denied", detail
+        if "does not exist by the name" in lowered or "page not found" in lowered:
+            return "unknown", detail
+        return "error", detail
+    return "error", detail_of(result)
+
+
+# ---------------------------------------------------------------- 探测各端点
+
+
+def chat_probe(base_url, model_id, key, args):
+    url = "%s/chat/completions" % base_url
+    payload = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": args.prompt}],
+        "max_tokens": args.max_tokens,
+        "temperature": 0,
+    }
+    result = post_with_retry(url, payload, key, args, "chat")
+    status, detail = classify(result)
+    finish = ""
+    body = result.json()
+    if isinstance(body, dict):
+        choices = body.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            finish = choices[0].get("finish_reason") or ""
+    return status, detail, "chat", result.elapsed_ms, finish, result.status
+
+
+def embedding_probe(base_url, model_id, key, args):
+    url = "%s/embeddings" % base_url
+    payload = {
+        "model": model_id,
+        "input": [args.prompt],
+        "input_type": "query",
+        "encoding_format": "float",
+        "truncate": "NONE",
+    }
+    result = post_with_retry(url, payload, key, args, "embed")
+    status, detail = classify(result)
+    if status == "unknown":
+        return None  # 该端点不认这个模型，继续试下一个端点
+    return status, detail, "embeddings", result.elapsed_ms, "", result.status
+
+
+def rerank_probe(base_url, model_id, key, args):
+    url = "%s/rerank" % base_url
+    payload = {
+        "model": model_id,
+        "query": args.prompt,
+        "passages": [{"text": args.prompt}],
+    }
+    result = post_with_retry(url, payload, key, args, "rerank")
+    status, detail = classify(result)
+    if status == "unknown":
+        return None
+    return status, detail, "rerank", result.elapsed_ms, "", result.status
+
+
+FALLBACK_STATUSES = ("unknown", "error")
+
+
+def probe_model(base_url, model_id, key, args, stop_event):
+    """依次尝试 chat -> embeddings -> rerank，返回一条记录。
+
+    只有「该端点不认识这个模型」(unknown) 才值得换端点；account_denied / eol /
+    5xx / timeout 都是定论，不浪费额外请求。
+    """
+    status, detail, endpoint, elapsed, finish, http_code = chat_probe(
+        base_url, model_id, key, args
+    )
+
+    if status in FALLBACK_STATUSES and args.alt_endpoints and not stop_event.is_set():
+        found_other_endpoint = False
+        for prober in (embedding_probe, rerank_probe):
+            if stop_event.is_set():
+                break
+            outcome = prober(base_url, model_id, key, args)
+            if outcome is None:
+                continue
+            status, detail, endpoint, elapsed, finish, http_code = outcome
+            found_other_endpoint = True
+            break
+        if not found_other_endpoint:
+            status = "non_chat"
+            detail = "chat/embeddings/rerank 均不识别该模型"
+            endpoint = "-"
+
+    if status == "ok" and elapsed > args.slow_ms:
+        status = "ok_slow"
+
+    return {
+        "id": model_id,
+        "status": status,
+        "endpoint": endpoint,
+        "http": http_code,
+        "latency_ms": elapsed,
+        "finish_reason": finish,
+        "detail": detail,
+    }
+
+
+# ---------------------------------------------------------------- 清单获取
+
+
+def fetch_model_list(base_url, key, timeout, retries):
+    url = "%s/models" % base_url
+    result = HttpResult(status=0, error="not attempted")
+    for attempt in range(retries + 1):
+        result = http_get_json(url, key, timeout)
+        if not retryable(result) or attempt >= retries:
+            break
+        time.sleep(min(2 ** attempt, 8))
+    if not result.ok:
+        raise SystemExit("拉取模型清单失败: HTTP %s %s" % (result.status, detail_of(result)))
+    payload = result.json() or {}
+    entries = payload.get("data") or []
+    return [item.get("id") for item in entries if isinstance(item, dict) and item.get("id")]
+
+
+def apply_filters(ids, args):
+    if args.include:
+        pattern = re.compile(args.include)
+        ids = [i for i in ids if pattern.search(i)]
+    if args.exclude:
+        pattern = re.compile(args.exclude)
+        ids = [i for i in ids if not pattern.search(i)]
+    for extra in args.extra or []:
+        for item in re.split(r"[,\s]+", extra):
+            if item and item not in ids:
+                ids.append(item)
+    if args.limit:
+        ids = ids[: args.limit]
+    return ids
+
+
+# ---------------------------------------------------------------- 输出
+
+
+class Painter:
+    def __init__(self, enabled):
+        self.enabled = enabled
+
+    def __call__(self, text, code):
+        if not self.enabled:
+            return text
+        return "\033[%sm%s\033[0m" % (code, text)
+
+
+STATUS_COLOR = {
+    "ok": "32",
+    "ok_slow": "33",
+    "eol": "90",
+    "account_denied": "90",
+    "unknown": "90",
+    "non_chat": "90",
+    "rate_limited": "35",
+    "server_error": "31",
+    "timeout": "35",
+    "auth_failed": "31",
+    "error": "31",
+}
+
+
+def print_result_line(index, total, record, paint):
+    label, _ = STATUS_META.get(record["status"], ("?", None))
+    color = STATUS_COLOR.get(record["status"], "0")
+    latency = "%6dms" % record["latency_ms"]
+    endpoint = (record["endpoint"] or "-")[:10]
+    counter = "[%*d/%d]" % (len(str(total)), index, total)
+    line = "%s %-6s %-18s %s %-10s" % (counter, record["status"], record["id"], latency, endpoint)
+    log(paint(line, color) + " %s" % label)
+
+
+def print_summary(records, paint):
+    groups = {}
+    for record in records:
+        groups.setdefault(record["status"], []).append(record)
+
+    usable = [r for r in records if STATUS_META.get(r["status"], (None, False))[1]]
+    usable.sort(key=lambda r: r["latency_ms"])
+    log("")
+    log("=== 可用模型 (%d) ===" % len(usable))
+    if usable:
+        width = max(len(r["id"]) for r in usable)
+        for record in usable:
+            log(
+                "  %-*s  %7dms  %s%s"
+                % (
+                    width,
+                    record["id"],
+                    record["latency_ms"],
+                    record["endpoint"],
+                    "  finish=%s" % record["finish_reason"] if record["finish_reason"] else "",
+                )
+            )
+    else:
+        log("  (无)")
+
+    for status in STATUS_ORDER:
+        if status in ("ok", "ok_slow") or status not in groups:
+            continue
+        label, _ = STATUS_META[status]
+        items = groups[status]
+        width = max(len(r["id"]) for r in items)
+        log("")
+        log("=== %s — %s (%d) ===" % (label, status, len(items)))
+        for record in sorted(items, key=lambda r: r["id"]):
+            detail = (record["detail"] or "")[:100]
+            log(paint("  %-*s  %s" % (width, record["id"], detail), STATUS_COLOR.get(status, "0")))
+
+    unknown_count = sum(len(v) for k, v in groups.items() if k not in ("ok", "ok_slow"))
+    log("")
+    log(
+        "合计 %d 个模型：可用 %d，其余 %d"
+        % (len(records), len(usable), unknown_count)
+    )
+    if groups.get("rate_limited") or groups.get("timeout"):
+        log(
+            paint(
+                "提示: 存在限流/超时，可用 -c 降低并发、--timeout 调大后重跑以确认。",
+                "35",
+            )
+        )
+
+
+def write_json(path, payload):
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=False)
+        fh.write("\n")
+
+
+def write_csv(path, records):
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["id", "status", "usable", "endpoint", "latency_ms", "detail"])
+        for record in records:
+            usable = STATUS_META.get(record["status"], (None, False))[1]
+            writer.writerow(
+                [
+                    record["id"],
+                    record["status"],
+                    "yes" if usable else ("unknown" if usable is None else "no"),
+                    record["endpoint"] or "",
+                    record["latency_ms"],
+                    (record["detail"] or "").replace("\n", " ")[:200],
+                ]
+            )
+
+
+def print_baseline_diff(baseline_path, records, paint, full_coverage=True):
+    try:
+        with open(baseline_path, encoding="utf-8") as fh:
+            old = json.load(fh)
+    except (OSError, ValueError) as exc:
+        log("读取基线失败，跳过对比: %s" % exc)
+        return
+
+    old_map = {m["id"]: m for m in old.get("models", [])}
+    new_map = {m["id"]: m for m in records}
+    old_at = old.get("generated_at", "?")
+
+    def usable(entry):
+        return STATUS_META.get(entry.get("status"), (None, False))[1]
+
+    newly_ok = [
+        m
+        for m in records
+        if m["id"] not in old_map or (not usable(old_map[m["id"]]) and usable(m))
+    ]
+    newly_bad = [
+        m
+        for m in records
+        if m["id"] in old_map and usable(old_map[m["id"]]) and not usable(m)
+    ]
+
+    log("")
+    log("=== 与基线对比 (基线 %s, 覆盖 %d/%d) ===" % (old_at, len(records), len(old_map)))
+    for title, items, color in (
+        ("新可用", [m["id"] for m in newly_ok], "32"),
+        ("新失效", [m["id"] for m in newly_bad], "31"),
+    ):
+        if items:
+            log(paint("  %s (%d): %s" % (title, len(items), ", ".join(items)), color))
+    if not newly_ok and not newly_bad:
+        log("  无变化")
+
+    if not full_coverage:
+        log("  (本次用了过滤参数，跳过「清单新增/移除」对比)")
+        return
+
+    added = [i for i in new_map if i not in old_map]
+    removed = [i for i in old_map if i not in new_map]
+    for title, items, color in (
+        ("清单新增", added, "36"),
+        ("清单移除", removed, "90"),
+    ):
+        if items:
+            log(paint("  %s (%d): %s" % (title, len(items), ", ".join(items)), color))
+
+
+# ---------------------------------------------------------------- main
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="nim-probe",
+        description="探测 NVIDIA NIM 当前账号可用的模型",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--api-key", help="覆盖 $NVIDIA_API_KEY / .env 中的密钥")
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="默认 %(default)s")
+    parser.add_argument("-i", "--include", help="只探测 ID 匹配该正则的模型")
+    parser.add_argument("-e", "--exclude", help="排除 ID 匹配该正则的模型")
+    parser.add_argument("--extra", action="append", help="额外探测的模型 ID，可重复/逗号分隔")
+    parser.add_argument("--limit", type=int, help="最多探测多少个模型")
+    parser.add_argument("-c", "--concurrency", type=int, default=4, help="并发数，默认 %(default)s")
+    parser.add_argument("--delay", type=float, default=0.25, help="每个任务启动前的错峰秒数，默认 %(default)s")
+    parser.add_argument("--timeout", type=float, default=90, help="单请求超时秒数，默认 %(default)s")
+    parser.add_argument("--retries", type=int, default=2, help="429/5xx/超时重试次数，默认 %(default)s")
+    parser.add_argument("--slow-ms", type=int, default=20000, help="超过该延迟标记为 ok_slow，默认 %(default)s")
+    parser.add_argument("--max-tokens", type=int, default=8, help="chat 探测 max_tokens，默认 %(default)s")
+    parser.add_argument("--prompt", default="ping", help="探测用的极短 prompt，默认 %(default)s")
+    parser.add_argument(
+        "--no-alt-endpoints",
+        dest="alt_endpoints",
+        action="store_false",
+        help="只测 chat/completions，不回退 embeddings/rerank",
+    )
+    parser.add_argument("--list-only", action="store_true", help="只打印清单，不发推理请求")
+    parser.add_argument("--from-list", help="从 --save-list 保存的清单文件读取，跳过在线拉取")
+    parser.add_argument("--save-list", help="把本次使用的清单 ID 写入文件")
+    parser.add_argument("--json", dest="json_path", help="把完整报告写入 JSON")
+    parser.add_argument("--csv", dest="csv_path", help="把结果表格写入 CSV")
+    parser.add_argument("--baseline", help="与指定的历史 JSON 报告对比增量")
+    parser.add_argument("-v", "--verbose", action="store_true", help="打印每次请求细节")
+    parser.add_argument("-q", "--quiet", action="store_true", help="只输出最终汇总")
+    parser.set_defaults(alt_endpoints=True)
+    return parser
+
+
+def main(argv=None):
+    global VERBOSE
+    args = build_parser().parse_args(argv)
+    VERBOSE = args.verbose
+
+    if args.concurrency < 1:
+        raise SystemExit("--concurrency 至少为 1")
+    if args.timeout <= 0:
+        raise SystemExit("--timeout 必须为正数")
+
+    paint = Painter(sys.stdout.isatty())
+
+    if args.list_only:
+        ids = fetch_model_list(args.base_url, None, args.timeout, args.retries)
+        ids = apply_filters(ids, args)
+        log("清单共 %d 个模型 (base=%s)" % (len(ids), args.base_url))
+        for model_id in ids:
+            log("  %s" % model_id)
+        if args.save_list:
+            write_lines(args.save_list, ids)
+            log("清单已保存: %s" % args.save_list)
+        return 0
+
+    key = resolve_key(args)
+    log("key=%s  base=%s  并发=%d  超时=%.0fs" % (
+        key_fingerprint(key), args.base_url, args.concurrency, args.timeout
+    ))
+
+    if args.from_list:
+        ids = read_lines(args.from_list)
+        log("从 %s 读取到 %d 个模型 ID" % (args.from_list, len(ids)))
+    else:
+        ids = fetch_model_list(args.base_url, key, args.timeout, args.retries)
+        log("在线清单 %d 个模型" % len(ids))
+
+    ids = apply_filters(ids, args)
+    if not ids:
+        raise SystemExit("过滤后没有待测模型，检查 --include / --exclude 正则。")
+
+    if args.save_list:
+        write_lines(args.save_list, ids)
+        log("清单已保存: %s" % args.save_list)
+
+    log("开始探测 %d 个模型 (alt_endpoints=%s)\n" % (len(ids), args.alt_endpoints))
+
+    records = []
+    auth_abort = None
+    stop_event = threading.Event()
+    done = 0
+    started = time.monotonic()
+
+    def task(model_id):
+        if args.delay > 0:
+            time.sleep(args.delay * random.uniform(0.5, 1.5))
+        return probe_model(args.base_url, model_id, key, args, stop_event)
+
+    with futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+        future_map = {pool.submit(task, model_id): model_id for model_id in ids}
+        for future in futures.as_completed(future_map):
+            model_id = future_map[future]
+            try:
+                record = future.result()
+            except Exception as exc:  # noqa: BLE001 - 单个模型失败不该中断全量
+                record = {
+                    "id": model_id,
+                    "status": "error",
+                    "endpoint": "chat",
+                    "http": None,
+                    "latency_ms": 0,
+                    "finish_reason": "",
+                    "detail": "probe crashed: %s: %s" % (exc.__class__.__name__, exc),
+                }
+            records.append(record)
+            done += 1
+            if record["status"] == "auth_failed":
+                auth_abort = auth_abort or record
+                stop_event.set()
+            if not args.quiet:
+                print_result_line(done, len(ids), record, paint)
+
+    records.sort(key=lambda r: r["id"])
+    total_ms = int((time.monotonic() - started) * 1000)
+
+    print_summary(records, paint)
+    log("耗时 %.1fs" % (total_ms / 1000.0))
+
+    if args.json_path:
+        counts = {}
+        for record in records:
+            counts[record["status"]] = counts.get(record["status"], 0) + 1
+        write_json(
+            args.json_path,
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "base_url": args.base_url,
+                "key_fingerprint": key_fingerprint(key),
+                "probed": len(records),
+                "elapsed_ms": total_ms,
+                "counts": counts,
+                "models": records,
+            },
+        )
+        log("JSON 报告: %s" % args.json_path)
+
+    if args.csv_path:
+        write_csv(args.csv_path, records)
+        log("CSV 报告: %s" % args.csv_path)
+
+    if args.baseline:
+        filtered = bool(args.include or args.exclude or args.limit or args.extra or args.from_list)
+        print_baseline_diff(args.baseline, records, paint, full_coverage=not filtered)
+
+    if auth_abort is not None:
+        log("")
+        log(paint("密钥被拒(403)，本次结果不可信: %s" % auth_abort["detail"], "31"))
+        return 2
+
+    return 0 if any(
+        STATUS_META.get(r["status"], (None, False))[1] for r in records
+    ) else 1
+
+
+def read_lines(path):
+    ids = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            item = line.strip()
+            if item and not item.startswith("#"):
+                ids.append(item)
+    return ids
+
+
+def write_lines(path, ids):
+    with open(path, "w", encoding="utf-8") as fh:
+        for item in ids:
+            fh.write(item + "\n")
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
