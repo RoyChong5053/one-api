@@ -4,76 +4,29 @@ import (
 	"github.com/Laisky/one-api/common/config"
 )
 
-var store = make(map[int][]bool)
-var metricSuccessChan = make(chan int, config.MetricSuccessChanSize)
-var metricFailChan = make(chan int, config.MetricFailChanSize)
-
-func consumeSuccess(channelId int) {
-	if len(store[channelId]) > config.MetricQueueSize {
-		store[channelId] = store[channelId][1:]
-	}
-	store[channelId] = append(store[channelId], true)
-}
-
-func consumeFail(channelId int) (bool, float64) {
-	if len(store[channelId]) > config.MetricQueueSize {
-		store[channelId] = store[channelId][1:]
-	}
-	store[channelId] = append(store[channelId], false)
-	successCount := 0
-	for _, success := range store[channelId] {
-		if success {
-			successCount++
-		}
-	}
-	successRate := float64(successCount) / float64(len(store[channelId]))
-	if len(store[channelId]) < config.MetricQueueSize {
-		return false, successRate
-	}
-	if successRate < config.MetricSuccessRateThreshold {
-		store[channelId] = make([]bool, 0)
-		return true, successRate
-	}
-	return false, successRate
-}
-
-func metricSuccessConsumer() {
-	for {
-		select {
-		case channelId := <-metricSuccessChan:
-			consumeSuccess(channelId)
-		}
-	}
-}
-
-func metricFailConsumer() {
-	for {
-		select {
-		case channelId := <-metricFailChan:
-			disable, successRate := consumeFail(channelId)
-			if disable {
-				go MetricDisableChannel(channelId, successRate)
-			}
-		}
-	}
-}
-
-func init() {
-	if config.EnableMetric {
-		go metricSuccessConsumer()
-		go metricFailConsumer()
-	}
-}
-
+// Emit reports a channel outcome.
+//
+// Historically this fed a second, independent success-rate store that
+// auto-disabled any channel dipping below MetricSuccessRateThreshold. That
+// store has been retired: channel health now lives in the model layer's health
+// engine (model.RecordChannelObservation), which is also what channel selection
+// gates on.
+//
+// Keeping both was actively harmful rather than merely redundant. The two used
+// different windows and different thresholds, so they disagreed about the same
+// channel: a channel at 85% success rated healthy by the routing engine — and
+// therefore given traffic — was simultaneously being disabled by this path for
+// being below the 80% bar. Worse, this store was a plain map read and written
+// by two independent consumer goroutines with no lock, so under
+// ENABLE_METRIC=true it raced on every relay.
+//
+// Emit is kept as a no-op so the ~15 call sites across the relay path do not
+// have to change; it remains a useful seam for future metrics.
 func Emit(channelId int, success bool) {
 	if !config.EnableMetric {
 		return
 	}
-	go func() {
-		if success {
-			metricSuccessChan <- channelId
-		} else {
-			metricFailChan <- channelId
-		}
-	}()
+	// Intentionally empty: see the note above.
+	_ = channelId
+	_ = success
 }

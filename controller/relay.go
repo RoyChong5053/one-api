@@ -101,7 +101,7 @@ func Relay(c *gin.Context) {
 	bizErr := relayHelper(c, relayMode)
 	if bizErr == nil {
 		monitor.Emit(channelId, true)
-		dbmodel.RecordChannelSuccess(channelId)
+		dbmodel.RecordChannelObservation(channelId, successObservation(c, startTime))
 
 		// Record successful relay request metrics
 		PrometheusMonitor.RecordRelayRequest(c, relayMeta, startTime, true, 0, 0, 0)
@@ -120,7 +120,7 @@ func Relay(c *gin.Context) {
 	// Record the failure for the initial attempt before calculating backoff,
 	// so that exponential backoff sees the incremented consecutive-failure
 	// counter and escalates the suspension duration correctly.
-	dbmodel.RecordChannelFailure(lastFailedChannelId)
+	dbmodel.RecordChannelObservation(lastFailedChannelId, failureObservation(c, bizErr, startTime))
 	// Ensure channel error processing is completed during graceful drain
 	graceful.GoCritical(ctx, "processChannelRelayError", func(ctx context.Context) {
 		processChannelRelayError(ctx, processChannelRelayErrorParams{
@@ -394,7 +394,7 @@ func Relay(c *gin.Context) {
 		bizErr = relayHelper(c, relayMode)
 		if bizErr == nil {
 			// Record successful retry
-			dbmodel.RecordChannelSuccess(c.GetInt(ctxkey.ChannelId))
+			dbmodel.RecordChannelObservation(c.GetInt(ctxkey.ChannelId), successObservation(c, retryStartTime))
 			PrometheusMonitor.RecordRelayRequest(c, retryMeta, retryStartTime, true, 0, 0, 0)
 			return
 		}
@@ -403,7 +403,7 @@ func Relay(c *gin.Context) {
 		PrometheusMonitor.RecordRelayRequest(c, retryMeta, retryStartTime, false, 0, 0, 0)
 
 		channelId = c.GetInt(ctxkey.ChannelId)
-		dbmodel.RecordChannelFailure(channelId)
+		dbmodel.RecordChannelObservation(channelId, failureObservation(c, bizErr, retryStartTime))
 		failedChannels[channelId] = true                     // Track this failed channel
 		failedProviderTypes[c.GetInt(ctxkey.Channel)] = true // Track this failed provider
 		lastFailedChannelId = channelId
@@ -555,6 +555,67 @@ func isStreamCutRelayError(err *model.ErrorWithStatusCode) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(err.Message), "upstream_cut")
+}
+
+// successObservation builds the channel-health observation for a relay that
+// completed cleanly.
+//
+// It contributes the three signals that a bare "it worked" cannot express:
+// full-request latency, time to first token, and generation throughput. The
+// throughput term is what catches providers that return HTTP 200 and then
+// stream at roughly one token per second — they look perfectly healthy to a
+// success-rate-only score while being unusable in practice.
+//
+// Missing values are left at zero, which the health engine treats as "signal
+// not available" rather than "signal is terrible", so non-streaming modes and
+// providers that omit usage do not get penalised.
+func successObservation(c *gin.Context, startTime time.Time) dbmodel.ChannelObservation {
+	end := time.Now()
+	obs := dbmodel.ChannelObservation{
+		Kind:      dbmodel.OutcomeSuccess,
+		LatencyMs: float64(end.Sub(startTime).Microseconds()) / 1000.0,
+	}
+
+	if v, ok := c.Get(ctxkey.UpstreamFirstByteAt); ok {
+		if firstByteAt, ok := v.(time.Time); ok && !firstByteAt.Before(startTime) {
+			obs.TTFTMs = float64(firstByteAt.Sub(startTime).Microseconds()) / 1000.0
+			if generation := end.Sub(firstByteAt); generation > 0 {
+				obs.GenerationMs = float64(generation.Microseconds()) / 1000.0
+			}
+		}
+	}
+
+	obs.CompletionTokens = c.GetInt(ctxkey.RelayCompletionTokens)
+	return obs
+}
+
+// failureObservation builds the channel-health observation for a failed relay.
+//
+// Client errors are reported as a non-scoring outcome: a malformed request says
+// nothing about whether the upstream channel is worth using, and counting them
+// would let a broken client degrade healthy channels.
+func failureObservation(c *gin.Context, err *model.ErrorWithStatusCode, startTime time.Time) dbmodel.ChannelObservation {
+	obs := dbmodel.ChannelObservation{
+		LatencyMs: float64(time.Since(startTime).Microseconds()) / 1000.0,
+	}
+	if err == nil {
+		obs.Kind = dbmodel.OutcomeServerError
+		return obs
+	}
+
+	kind, scoring := dbmodel.ClassifyRelayError(
+		err.StatusCode,
+		fmt.Sprint(err.Code),
+		err.Message,
+		isStreamCutRelayError(err),
+	)
+	obs.Kind = kind
+	if !scoring {
+		// Mark as non-scoring by leaving the kind informative; the health
+		// engine ignores client errors when moving the score.
+		obs.Kind = dbmodel.OutcomeClientError
+	}
+	return obs
 }
 
 // isClientContextCancel returns true if the error is caused by the caller's context
@@ -926,11 +987,12 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 		}
 
 		// Escalate to channel-level auto-disable after repeated 429s.
-		// RecordChannelFailure (relay.go:123) was already called before this function,
+		// The failure observation was already recorded by the caller before this,
 		// so consecutiveFailures reflects the incremented count.
 		// This preserves per-request retry (other channels are tried) while ensuring
 		// a persistently rate-limited channel is eventually taken out of rotation.
-		// Auto-enable later via AutomaticallyTestChannels(scope=auto_disabled).
+		// Recovery is handled by the health engine, which requires repeated clean
+		// probes rather than a single passing test.
 		consecutiveFailures := dbmodel.GetConsecutiveChannelFailures(params.ChannelId)
 		if consecutiveFailures >= 3 {
 			lg.Error("channel disabled due to repeated rate limit (429)",

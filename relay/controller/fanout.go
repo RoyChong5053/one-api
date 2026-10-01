@@ -7,8 +7,10 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,13 +85,47 @@ func reportFanoutSubRequest(ctx context.Context, group, modelName string, channe
 	}
 	if err != nil {
 		monitor.Emit(channelId, false)
+		// Fan-out sub-requests carry the same health meaning as a full
+		// relay: classify the failure so stream cuts and rate limits are
+		// attributed to the right signal rather than lumped in as generic
+		// server errors.
+		kind, scoring := model.ClassifyRelayError(statusOfFanoutError(err), "", err.Error(), false)
+		if !scoring {
+			kind = model.OutcomeClientError
+		}
+		model.RecordChannelObservation(channelId, model.ChannelObservation{Kind: kind})
 		backoff := fanoutBackoffDuration(channelId)
 		_ = model.SuspendAbility(ctx, group, modelName, channelId, backoff)
 		return
 	}
 	monitor.Emit(channelId, true)
-	model.RecordChannelSuccess(channelId)
+	model.RecordChannelObservation(channelId, model.ChannelObservation{Kind: model.OutcomeSuccess})
 	model.ResetConsecutiveChannelFailures(channelId)
+}
+
+// upstreamStatusPattern extracts the HTTP status from the error text the
+// fan-out sub-requests build ("upstream returned status 429: ..."). Fan-out
+// wraps upstream failures in plain errors rather than a typed status carrier,
+// so this is how the status survives.
+var upstreamStatusPattern = regexp.MustCompile(`upstream returned status (\d{3})`)
+
+// statusOfFanoutError digs a status code out of a fan-out sub-request error.
+// An unrecognised error is reported as an upstream failure, which is the
+// conservative assumption for a circuit breaker.
+func statusOfFanoutError(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	msg := err.Error()
+	if m := upstreamStatusPattern.FindStringSubmatch(msg); len(m) == 2 {
+		if code, convErr := strconv.Atoi(m[1]); convErr == nil {
+			return code
+		}
+	}
+	if strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "timeout") {
+		return http.StatusRequestTimeout
+	}
+	return http.StatusInternalServerError
 }
 
 // fanoutRerankResultItem mirrors the rerank result structure for fan-out merging.
@@ -133,7 +169,7 @@ func TryFanOutEmbedding(
 
 	// Get all available channels for this group+model
 	group := c.GetString(ctxkey.Group)
- modelName := textRequest.Model
+	modelName := textRequest.Model
 	channels, err := model.GetChannelsFromCache(group, modelName)
 	if err != nil || len(channels) < 2 {
 		return nil
@@ -607,9 +643,9 @@ func fanOutRerankSingle(
 	}
 
 	var rerankResp struct {
-		Results []fanoutRerankResultItem     `json:"results,omitempty"`
-		Data    []fanoutRerankResultItem     `json:"data,omitempty"`
-		Usage   *relaymodel.Usage  `json:"usage,omitempty"`
+		Results []fanoutRerankResultItem `json:"results,omitempty"`
+		Data    []fanoutRerankResultItem `json:"data,omitempty"`
+		Usage   *relaymodel.Usage        `json:"usage,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &rerankResp); err != nil {
 		return fanOutRerankResult{err: errors.Wrap(err, "unmarshal rerank response")}

@@ -17,7 +17,6 @@ import (
 	"github.com/Laisky/one-api/common"
 	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/logger"
-	"github.com/Laisky/one-api/common/random"
 	"github.com/Laisky/one-api/dto"
 )
 
@@ -306,20 +305,12 @@ var channelSyncLock sync.RWMutex
 
 // ---------------------------------------------------------------------------
 // Channel health tracking and instant circuit-breaking
+//
+// The health scoring engine itself lives in channel_health.go; this section
+// owns only the circuit-breaker side of it (suspension bookkeeping).
 // ---------------------------------------------------------------------------
 
-// channelHealth holds the sliding-window health state for a single channel.
-type channelHealth struct {
-	mu                  sync.RWMutex
-	successes           []bool       // ring buffer of recent outcomes
-	consecutiveFailures int          // consecutive failures since last success
-}
-
 var (
-	// channelHealthStore tracks per-channel health for weighted selection.
-	channelHealthStore = make(map[int]*channelHealth)
-	channelHealthLock  sync.RWMutex
-
 	// suspendedChannels holds channels that have been temporarily excluded
 	// from selection by the in-memory circuit breaker (before the periodic
 	// SYNC_FREQUENCY cache rebuild picks up the DB suspension).
@@ -327,82 +318,6 @@ var (
 	suspendedChannels   = make(map[int]time.Time)
 	suspendedChannelsMu sync.RWMutex
 )
-
-// getOrCreateChannelHealth returns the health tracker for a channel, creating
-// one if it does not yet exist.
-func getOrCreateChannelHealth(channelId int) *channelHealth {
-	channelHealthLock.Lock()
-	defer channelHealthLock.Unlock()
-	h, ok := channelHealthStore[channelId]
-	if !ok {
-		h = &channelHealth{
-			successes: make([]bool, 0, config.ChannelHealthWindowSize),
-		}
-		channelHealthStore[channelId] = h
-	}
-	return h
-}
-
-// RecordChannelSuccess records a successful relay for the given channel and
-// resets its consecutive-failure counter.
-func RecordChannelSuccess(channelId int) {
-	h := getOrCreateChannelHealth(channelId)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.consecutiveFailures = 0
-	if len(h.successes) >= config.ChannelHealthWindowSize {
-		h.successes = h.successes[1:]
-	}
-	h.successes = append(h.successes, true)
-}
-
-// RecordChannelFailure records a failed relay for the given channel and
-// increments its consecutive-failure counter.
-func RecordChannelFailure(channelId int) {
-	h := getOrCreateChannelHealth(channelId)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.consecutiveFailures++
-	if len(h.successes) >= config.ChannelHealthWindowSize {
-		h.successes = h.successes[1:]
-	}
-	h.successes = append(h.successes, false)
-}
-
-// GetChannelHealthScore returns a value in [0, 1] representing the recent
-// success rate. 1.0 means 100 % successful; 0 means the window is empty (treat as healthy).
-func GetChannelHealthScore(channelId int) float64 {
-	h := getOrCreateChannelHealth(channelId)
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	if len(h.successes) == 0 {
-		return 1.0
-	}
-	var successCount int
-	for _, s := range h.successes {
-		if s {
-			successCount++
-		}
-	}
-	return float64(successCount) / float64(len(h.successes))
-}
-
-// GetConsecutiveChannelFailures returns the number of consecutive failures
-// for the given channel since its last success.
-func GetConsecutiveChannelFailures(channelId int) int {
-	h := getOrCreateChannelHealth(channelId)
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.consecutiveFailures
-}
-
-// ResetConsecutiveChannelFailures resets the consecutive-failure counter.
-func ResetConsecutiveChannelFailures(channelId int) {
-	h := getOrCreateChannelHealth(channelId)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.consecutiveFailures = 0
-}
 
 // InvalidateChannelInCache marks a channel as temporarily unavailable in
 // the in-memory cache so that subsequent requests skip it. The exclusion
@@ -412,6 +327,21 @@ func InvalidateChannelInCache(channelId int, duration time.Duration) {
 	suspendedChannelsMu.Lock()
 	defer suspendedChannelsMu.Unlock()
 	suspendedChannels[channelId] = time.Now().Add(duration)
+}
+
+// suspendedUntil returns the expiry of a channel's in-memory circuit-breaker
+// suspension, and whether one is active.
+func suspendedUntil(channelId int) (time.Time, bool) {
+	suspendedChannelsMu.RLock()
+	defer suspendedChannelsMu.RUnlock()
+	until, ok := suspendedChannels[channelId]
+	if !ok {
+		return time.Time{}, false
+	}
+	if time.Now().After(until) {
+		return time.Time{}, false
+	}
+	return until, true
 }
 
 // removeExpiredSuspensions cleans up entries whose suspension has expired.
@@ -444,17 +374,37 @@ func IsChannelSuspendedInCache(channelId int) bool {
 
 // rebuildSuspendedChannelsFromDB reloads suspension state from the abilities
 // table. This is called alongside InitChannelCache to keep the fast-path in sync.
+//
+// The map is rebuilt rather than merged: abilities rows carry the authoritative
+// per-model suspension, and a previously merged rebuild would leave channels
+// suspended forever once their DB row expired.
 func rebuildSuspendedChannelsFromDB() {
 	var abilities []*Ability
 	DB.Find(&abilities)
 	now := time.Now()
 
+	fresh := make(map[int]time.Time)
+	for _, a := range abilities {
+		if a.SuspendUntil == nil || !a.SuspendUntil.After(now) {
+			continue
+		}
+		// A channel may serve several models; keep the furthest expiry so
+		// the channel stays out of selection until every suspended
+		// ability has come back.
+		if existing, ok := fresh[a.ChannelId]; !ok || a.SuspendUntil.After(existing) {
+			fresh[a.ChannelId] = *a.SuspendUntil
+		}
+	}
+
 	suspendedChannelsMu.Lock()
 	defer suspendedChannelsMu.Unlock()
-	for _, a := range abilities {
-		if a.SuspendUntil != nil && a.SuspendUntil.After(now) {
-			suspendedChannels[a.ChannelId] = *a.SuspendUntil
+	for id := range suspendedChannels {
+		if _, ok := fresh[id]; !ok {
+			delete(suspendedChannels, id)
 		}
+	}
+	for id, until := range fresh {
+		suspendedChannels[id] = until
 	}
 }
 
@@ -543,6 +493,9 @@ func SyncChannelCache(frequency int) {
 
 // CleanExpiredSuspensions periodically removes expired in-memory suspension
 // entries. Call this in a background goroutine on startup.
+//
+// Prefer StartChannelHealthJanitor, which runs this loop and also GCs health
+// records for deleted channels.
 func CleanExpiredSuspensions() {
 	for {
 		time.Sleep(30 * time.Second)
@@ -677,15 +630,16 @@ func CacheGetSatisfiedChannel(group string, model string, preferLowestPriority b
 
 	var channel *Channel
 	if preferLowestPriority && endIdx < len(candidateChannels) {
-		idx := random.RandRange(endIdx, len(candidateChannels))
-		channel = candidateChannels[idx]
-	} else {
-		// Same-priority tier uses health-weighted selection (Weight *
-		// healthScore) so a weight=10 CPU node takes ~10x the single-path
-		// traffic of weight=1 instead of uniform rand.Intn. Mirrors
-		// CacheGetSatisfiedChannelExcluding/selectByHealthWeight.
-		channel = selectByHealthWeight(candidateChannels[:endIdx], model)
+		// The lower-priority tail still gets band-gated selection. It used
+		// to be a uniform random pick, which meant a known-dead channel
+		// sitting at the back of the queue was as likely to be picked as a
+		// healthy one.
+		channel = selectByHealthBand(candidateChannels[endIdx:], model)
+		logger.Logger.Debug("select channel in cache (lowest priority, health-banded)",
+			zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
+		return channel, nil
 	}
+	channel = selectByHealthBand(candidateChannels[:endIdx], model)
 	logger.Logger.Info("select channel in cache", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
 	return channel, nil
 }
@@ -797,8 +751,8 @@ func CacheGetSatisfiedChannelExcluding(group string, model string, preferLowestP
 
 		// If there are lower priority channels available, select from them
 		if endIdx < len(candidateChannels) {
-			channel := selectByHealthWeight(candidateChannels[endIdx:], model)
-			logger.Logger.Debug("select channel in cache (lowest priority, health-weighted)", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
+			channel := selectByHealthBand(candidateChannels[endIdx:], model)
+			logger.Logger.Debug("select channel in cache (lowest priority, health-banded)", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
 			return channel, nil
 		} else {
 			// No lower priority channels available, return error to indicate we should try a different approach
@@ -832,17 +786,31 @@ func CacheGetSatisfiedChannelExcluding(group string, model string, preferLowestP
 			return nil, errors.New("no channels with maximum priority available")
 		}
 
-		channel := selectByHealthWeight(maxPriorityChannels, model)
-		logger.Logger.Debug("select channel in cache (highest priority, health-weighted)", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
+		channel := selectByHealthBand(maxPriorityChannels, model)
+		logger.Logger.Debug("select channel in cache (highest priority, health-banded)", zap.String("channel_name", channel.Name), zap.Int("channel_id", channel.Id))
 		return channel, nil
 	}
 }
 
-// selectByHealthWeight picks a channel using health-weighted random selection.
-// Healthier channels (higher recent success rate) are more likely to be chosen.
-// The channel's configured Weight field is used as a base multiplier: a channel
-// with weight=3 receives roughly 3x the traffic of weight=1 (before health adjustment).
-func selectByHealthWeight(channels []*Channel, model string) *Channel {
+// selectByHealthBand picks a channel from a set that already shares one
+// priority, in two stages.
+//
+// Stage one is a hard gate on health. Channels are bucketed into healthy,
+// degraded and unhealthy by their composite health score, and only the best
+// non-empty bucket is considered. This is why a channel with weight=100 but an
+// unhealthy band receives zero traffic: the configured weight is never allowed
+// to outvote the health verdict.
+//
+// Stage two applies the operator's configured Weight, but only as a tie-breaker
+// among channels that already landed in the same bucket. Weight=3 therefore
+// means "send about three times the traffic of its equally-healthy peers", not
+// "always prefer this one".
+//
+// The final fallback exists so a total outage in the health signal degrades into
+// "spread traffic anyway" rather than an error. When every candidate is
+// unhealthy there is no better option, and starving them all would turn a
+// degraded fleet into a hard outage.
+func selectByHealthBand(channels []*Channel, model string) *Channel {
 	if len(channels) == 0 {
 		return nil
 	}
@@ -850,31 +818,72 @@ func selectByHealthWeight(channels []*Channel, model string) *Channel {
 		return channels[0]
 	}
 
-	// Build a weight for each channel combining its configured Weight and health score.
-	// A minimum health weight of 0.1 prevents completely starving degraded channels
-	// that might have recovered.
-	weights := make([]float64, len(channels))
-	var totalWeight float64
-	const minHealthWeight = 0.1
-	for i, ch := range channels {
-		healthScore := GetChannelHealthScore(ch.Id)
-		hw := healthScore
-		if hw < minHealthWeight {
-			hw = minHealthWeight
+	var healthy, degraded, unhealthy []*Channel
+	for _, ch := range channels {
+		switch GetChannelHealthBand(ch.Id) {
+		case BandHealthy:
+			healthy = append(healthy, ch)
+		case BandDegraded, BandUnknown:
+			// Unknown is grouped with degraded rather than healthy:
+			// a channel with too little evidence to judge should not
+			// outrank one that has been demonstrably working.
+			degraded = append(degraded, ch)
+		default:
+			unhealthy = append(unhealthy, ch)
 		}
-		// Combine configured weight with health score
-		weights[i] = float64(ch.GetWeight()) * hw
-		totalWeight += weights[i]
 	}
 
-	// Weighted random selection
+	pool := healthy
+	switch {
+	case len(pool) > 0:
+	case len(degraded) > 0:
+		pool = degraded
+		logger.Logger.Debug("no healthy channel available, falling back to degraded",
+			zap.String("model", model),
+			zap.Int("degraded", len(degraded)),
+			zap.Int("unhealthy", len(unhealthy)),
+		)
+	case len(unhealthy) > 0:
+		pool = unhealthy
+		logger.Logger.Warn("all candidate channels are unhealthy, falling back to full set",
+			zap.String("model", model),
+			zap.Int("candidates", len(unhealthy)),
+		)
+	default:
+		return channels[0]
+	}
+
+	// Inside the chosen band, apply the configured weight. Any channel whose
+	// weight is unset reads as 1 via GetWeight, so this degrades gracefully to
+	// a uniform pick across an evenly configured tier.
+	totalWeight := 0.0
+	weights := make([]float64, len(pool))
+	for i, ch := range pool {
+		w := float64(ch.GetWeight())
+		if w <= 0 {
+			w = 1
+		}
+		weights[i] = w
+		totalWeight += w
+	}
+	if totalWeight <= 0 {
+		return pool[0]
+	}
+
 	r := rand.Float64() * totalWeight
-	var cumulative float64
+	cumulative := 0.0
 	for i, w := range weights {
 		cumulative += w
 		if r < cumulative {
-			return channels[i]
+			return pool[i]
 		}
 	}
-	return channels[len(channels)-1]
+	return pool[len(pool)-1]
+}
+
+// selectByHealthWeight is retained for callers and tests written against the old
+// name. It now applies band gating rather than multiplying weight by a floored
+// health score.
+func selectByHealthWeight(channels []*Channel, model string) *Channel {
+	return selectByHealthBand(channels, model)
 }

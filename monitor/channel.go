@@ -46,6 +46,11 @@ func DisableChannel(channelId int, channelName string, reason string) {
 	notifyRootUser(subject, content)
 }
 
+// MetricDisableChannel disables a channel that has been failing persistently.
+//
+// Deprecated and no longer called: the success-rate store that used to drive it
+// has been retired in favour of the model-layer health engine. It is kept so
+// that anything referencing it still compiles.
 func MetricDisableChannel(channelId int, successRate float64) {
 	model.UpdateChannelStatusById(channelId, model.ChannelStatusAutoDisabled)
 	logger.Logger.Info("channel has been disabled due to low success rate", zap.Int("id", channelId), zap.Float64("success_rate", successRate*100))

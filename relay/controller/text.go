@@ -429,6 +429,14 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	applyOutputVideoCharges(c, &usage, meta)
 	tooling.ApplyBuiltinToolCharges(c, &usage, meta, channelRecord, requestAdaptor)
 
+	// Expose the generated token count so controller/relay.go can derive
+	// generation throughput for the channel health engine. Kept in the context
+	// rather than returned, because the relay success path already exists and
+	// threading a new return value through every caller would be invasive.
+	if usage != nil && usage.CompletionTokens > 0 {
+		c.Set(ctxkey.RelayCompletionTokens, usage.CompletionTokens)
+	}
+
 	// post-consume quota
 	quotaId := c.GetInt(ctxkey.Id)
 	// refund pre-consumed quota immediately

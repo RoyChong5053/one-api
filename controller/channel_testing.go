@@ -231,7 +231,13 @@ func calculateTestCost(usage *relaymodel.Usage, meta *meta.Meta, request *relaym
 	return computeResult.TotalQuota
 }
 
-func testChannel(ctx context.Context, channel *model.Channel, request *relaymodel.GeneralOpenAIRequest) (responseMessage string, err error, openaiErr *relaymodel.Error) {
+// testChannel runs a single non-streaming completion against a channel.
+//
+// probe is optional: when non-nil it is populated with the signals the channel
+// health engine needs (time to first token, generation span, completion
+// tokens). Passing nil keeps the cheaper legacy behaviour used by the manual
+// test endpoints.
+func testChannel(ctx context.Context, channel *model.Channel, request *relaymodel.GeneralOpenAIRequest, probe *model.ChannelObservation) (responseMessage string, err error, openaiErr *relaymodel.Error) {
 	lg := gmw.GetLogger(ctx)
 	startTime := time.Now()
 	w := httptest.NewRecorder()
@@ -407,6 +413,9 @@ func testChannel(ctx context.Context, channel *model.Channel, request *relaymode
 
 	// Capture usage for test logging
 	actualUsage = usage
+	if probe != nil {
+		populateProbeMetrics(probe, c, startTime, usage)
+	}
 	rawResponse := w.Body.String()
 	_, responseMessage, err = parseTestResponse(rawResponse)
 	if err != nil {
@@ -777,7 +786,7 @@ func TestChannel(c *gin.Context) {
 		responseMessage, err, openaiErr = testEmbeddingChannel(ctx, channel, embedReq)
 	default:
 		testRequest := buildTestRequest(modelName)
-		responseMessage, err, openaiErr = testChannel(ctx, channel, testRequest)
+		responseMessage, err, openaiErr = testChannel(ctx, channel, testRequest, nil)
 	}
 	tok := time.Now()
 	milliseconds := tok.Sub(tik).Milliseconds()
@@ -831,10 +840,6 @@ func testChannels(ctx context.Context, notify bool, scope string) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to get all channels")
 	}
-	var disableThreshold = int64(config.ChannelDisableThreshold * 1000)
-	if disableThreshold == 0 {
-		disableThreshold = 10000000 // a impossible value
-	}
 	go func() {
 		lg := gmw.GetLogger(ctx)
 		for _, channel := range channels {
@@ -869,17 +874,31 @@ func testChannels(ctx context.Context, notify bool, scope string) error {
 				_, err, openaiErr = testEmbeddingChannel(ctx, channel, embedReq)
 			default:
 				testRequest := buildTestRequest(chosenModel)
-				_, err, openaiErr = testChannel(ctx, channel, testRequest)
+				_, err, openaiErr = testChannel(ctx, channel, testRequest, nil)
 			}
 			tok := time.Now()
 			milliseconds := tok.Sub(tik).Milliseconds()
-			if isChannelEnabled && milliseconds > disableThreshold {
-				err = errors.Errorf("Response time %.2fs exceeds threshold %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
+			if isChannelEnabled && milliseconds >= config.ChannelHealthDisableLatencyMs {
+				// Slow is not the same as wedged. Only a probe past the hang
+				// threshold disables the channel; anything merely sluggish is
+				// recorded as a slow observation so the health engine downranks
+				// it and the router prefers a livelier peer. Previously any
+				// probe over ChannelDisableThreshold took the channel out of
+				// rotation entirely, which turned a mildly slow provider into
+				// an outage.
+				err = errors.Errorf("Response time %.2fs exceeds hang threshold %.2fs",
+					float64(milliseconds)/1000.0, float64(config.ChannelHealthDisableLatencyMs)/1000.0)
 				if config.AutomaticDisableChannelEnabled {
 					monitor.DisableChannel(channel.Id, channel.Name, err.Error())
 				} else {
 					_ = message.Notify(message.ByAll, fmt.Sprintf("Channel %s （%d）Test超时", channel.Name, channel.Id), "", err.Error())
 				}
+			} else if isChannelEnabled && milliseconds >= int64(config.ChannelHealthLatencySlowMs) {
+				lg.Debug("channel probe degraded by slow response time",
+					zap.Int("channel_id", channel.Id),
+					zap.Int64("latency_ms", milliseconds),
+					zap.Float64("slow_threshold_ms", config.ChannelHealthLatencySlowMs),
+				)
 			}
 			// Only disable a channel on failure when AutomaticDisableChannelEnabled is true.
 			if isChannelEnabled && (err != nil || monitor.ShouldDisableChannel(openaiErr, -1)) {
@@ -897,7 +916,34 @@ func testChannels(ctx context.Context, notify bool, scope string) error {
 					_ = message.Notify(message.ByAll, fmt.Sprintf("Channel %s （%d）Test失败", channel.Name, channel.Id), "", reason)
 				}
 			}
-			if !isChannelEnabled && (err == nil && monitor.ShouldEnableChannel(err, openaiErr)) {
+			// Record the probe result into the health engine so the auto-disabled
+			// sweep feeds the same score the router gates on. Without this the
+			// recovery decision would be made on a single test result with no
+			// history behind it.
+			model.RecordChannelObservation(channel.Id, model.ChannelObservation{
+				Kind:      classifyProbeFailure(openaiErr, err),
+				LatencyMs: float64(milliseconds),
+			})
+
+			if !isChannelEnabled && err == nil && openaiErr == nil {
+				// Prefer the health engine's stricter gate: it requires
+				// repeated clean probes rather than one, so a provider that
+				// briefly stopped answering cannot be immediately put back
+				// into rotation the moment it answers once.
+				if recovered, why := model.ShouldAutoRecoverChannel(channel.Id); recovered {
+					lg.Info("auto-disabled channel recovered by channel test",
+						zap.Int("channel_id", channel.Id),
+						zap.String("channel_name", channel.Name),
+						zap.Int64("latency_ms", milliseconds),
+					)
+					monitor.EnableChannel(channel.Id, channel.Name)
+				} else if channel.Status == model.ChannelStatusAutoDisabled {
+					lg.Debug("auto-disabled channel still awaiting recovery",
+						zap.Int("channel_id", channel.Id),
+						zap.String("reason", why),
+					)
+				}
+			} else if !isChannelEnabled && (err == nil && monitor.ShouldEnableChannel(err, openaiErr)) {
 				monitor.EnableChannel(channel.Id, channel.Name)
 			}
 			channel.UpdateResponseTime(milliseconds)

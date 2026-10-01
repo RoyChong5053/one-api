@@ -277,7 +277,10 @@ func SuspendAbility(ctx context.Context, group string, modelName string, channel
 	// Immediately mark the channel as unavailable in the in-memory cache
 	// so the next request skips it without waiting for SYNC_FREQUENCY.
 	InvalidateChannelInCache(channelId, duration)
-	RecordChannelFailure(channelId)
+	// The failure outcome is recorded by the caller (controller/relay.go records it
+	// before invoking processChannelRelayError, which is what calls into here). Do not
+	// record it again: a double increment made the exponential backoff ladder climb
+	// roughly twice as fast as calculateBackoffDuration documents.
 	return nil
 }
 

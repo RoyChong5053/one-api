@@ -66,6 +66,25 @@ type Channel struct {
 	InferenceProfileArnMap *string         `json:"inference_profile_arn_map" gorm:"type:text"` // JSON string mapping model names to AWS Bedrock Inference Profile ARNs
 	HiddenModelsProvided   bool            `json:"-" gorm:"-"`
 	NullableFieldsProvided map[string]bool `json:"-" gorm:"-"`
+
+	// Health is the live channel-health record that the router's band gate
+	// reads. It is populated by the admin list/search handlers rather than
+	// loaded from the database, so the score shown in the UI is exactly the
+	// score selection is currently gating on.
+	Health *HealthSnapshot `json:"health,omitempty" gorm:"-"`
+}
+
+// AttachHealthSnapshots fills in the health field for a batch of channels.
+// A channel with no recorded observations still gets a snapshot, so the UI can
+// tell "not yet measured" apart from "measured and broken".
+func AttachHealthSnapshots(channels []*Channel) {
+	for _, channel := range channels {
+		if channel == nil {
+			continue
+		}
+		snapshot := GetChannelHealthSnapshot(channel.Id)
+		channel.Health = &snapshot
+	}
 }
 
 var channelSortFields = map[string]string{

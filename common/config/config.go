@@ -457,14 +457,133 @@ var (
 	// Unit: requests
 	ChannelHealthWindowSize = env.Int("CHANNEL_HEALTH_WINDOW_SIZE", 50)
 
-	// ChannelHealthThreshold defines the minimum success rate below which a
-	// channel is considered degraded. Degraded channels are deprioritised during
-	// selection but not fully excluded unless explicitly suspended.
+	// ChannelHealthThreshold is the lower bound of the healthy band: a channel
+	// whose composite health score is at or above this value competes normally.
 	//
 	// Environment variable: CHANNEL_HEALTH_THRESHOLD
-	// Default: 0.3 (30%)
+	// Default: 0.7
 	// Range: 0.0 – 1.0
-	ChannelHealthThreshold = env.Float64("CHANNEL_HEALTH_THRESHOLD", 0.3)
+	ChannelHealthThreshold = env.Float64("CHANNEL_HEALTH_THRESHOLD", 0.7)
+
+	// ChannelHealthDegradedThreshold is the lower bound of the degraded band.
+	// Channels below it are unhealthy: they are excluded from selection whenever
+	// at least one healthy candidate exists for the same (group, model, priority).
+	//
+	// Environment variable: CHANNEL_HEALTH_DEGRADED_THRESHOLD
+	// Default: 0.35
+	// Range: 0.0 – 1.0
+	ChannelHealthDegradedThreshold = env.Float64("CHANNEL_HEALTH_DEGRADED_THRESHOLD", 0.35)
+
+	// ChannelHealthMinSamples is the number of observations required before a
+	// channel's band is trusted. Below this the band is "unknown" and the channel
+	// is treated as healthy, so a freshly added channel is not penalised before it
+	// has served any traffic.
+	//
+	// Environment variable: CHANNEL_HEALTH_MIN_SAMPLES
+	// Default: 3
+	ChannelHealthMinSamples = env.Int("CHANNEL_HEALTH_MIN_SAMPLES", 3)
+
+	// ChannelHealthEWMAAlpha is the smoothing factor of the exponentially weighted
+	// moving averages backing every health signal. Higher reacts faster to
+	// degradation but is noisier.
+	//
+	// Environment variable: CHANNEL_HEALTH_EWMA_ALPHA
+	// Default: 0.3
+	// Range: (0.0 – 1.0]
+	ChannelHealthEWMAAlpha = env.Float64("CHANNEL_HEALTH_EWMA_ALPHA", 0.3)
+
+	// ChannelHealthLatencyFastMs / ChannelHealthLatencySlowMs bound the latency
+	// score. At or below Fast the latency multiplier is 1.0; at or above Slow it
+	// is 0.0. Values in between are interpolated linearly. SlowMs doubles as the
+	// "degrade this channel" threshold the operator asked for (default 5s).
+	//
+	// Environment variables: CHANNEL_HEALTH_LATENCY_FAST_MS, CHANNEL_HEALTH_LATENCY_SLOW_MS
+	// Unit: milliseconds
+	ChannelHealthLatencyFastMs = float64(env.Int("CHANNEL_HEALTH_LATENCY_FAST_MS", 1000))
+	ChannelHealthLatencySlowMs = float64(env.Int("CHANNEL_HEALTH_LATENCY_SLOW_MS", 5000))
+
+	// ChannelHealthTTFTFastMs / ChannelHealthTTFTSlowMs bound the time-to-first-token
+	// score using the same interpolation as the latency score. Non-streaming
+	// responses have no TTFT and are exempt.
+	//
+	// Environment variables: CHANNEL_HEALTH_TTFT_FAST_MS, CHANNEL_HEALTH_TTFT_SLOW_MS
+	// Unit: milliseconds
+	ChannelHealthTTFTFastMs = float64(env.Int("CHANNEL_HEALTH_TTFT_FAST_MS", 500))
+	ChannelHealthTTFTSlowMs = float64(env.Int("CHANNEL_HEALTH_TTFT_SLOW_MS", 5000))
+
+	// ChannelHealthTPSFloor / ChannelHealthTPSGood bound the throughput score.
+	// This is what catches providers that "fake" availability by accepting the
+	// request but streaming at ~1 token/second. At or above Good the multiplier is
+	// 1.0; at or below Floor it is 0.0.
+	//
+	// Environment variables: CHANNEL_HEALTH_TPS_FLOOR, CHANNEL_HEALTH_TPS_GOOD
+	// Unit: tokens per second
+	ChannelHealthTPSFloor = float64(env.Int("CHANNEL_HEALTH_TPS_FLOOR", 5))
+	ChannelHealthTPSGood  = float64(env.Int("CHANNEL_HEALTH_TPS_GOOD", 20))
+
+	// ChannelHealthStreamCutPenalty / ChannelHealthRateLimitPenalty are the
+	// fractional score penalties applied at a cutRate / rateLimitRate of 1.0. A
+	// channel that always cuts loses 70% of its score; one that is always rate
+	// limited loses 50%.
+	//
+	// Environment variables: CHANNEL_HEALTH_STREAM_CUT_PENALTY, CHANNEL_HEALTH_RATE_LIMIT_PENALTY
+	// Range: 0.0 – 1.0
+	ChannelHealthStreamCutPenalty = env.Float64("CHANNEL_HEALTH_STREAM_CUT_PENALTY", 0.7)
+	ChannelHealthRateLimitPenalty = env.Float64("CHANNEL_HEALTH_RATE_LIMIT_PENALTY", 0.5)
+
+	// ChannelHealthDisableLatencyMs is the probe latency above which a channel is
+	// considered hung and auto-disabled outright. Latencies between
+	// ChannelHealthLatencySlowMs and this value only degrade the channel's score.
+	//
+	// Environment variable: CHANNEL_HEALTH_DISABLE_LATENCY_MS
+	// Unit: milliseconds
+	ChannelHealthDisableLatencyMs = int64(env.Int("CHANNEL_HEALTH_DISABLE_LATENCY_MS", 30000))
+
+	// ChannelHealthProbeIdleMin is how long a channel may go without any
+	// observation before the background prober considers it stale and refreshes
+	// its score. Channels with live traffic are never probed unnecessarily.
+	//
+	// Environment variable: CHANNEL_HEALTH_PROBE_IDLE_MIN
+	// Default: 180 (3 hours)
+	// Unit: minutes
+	ChannelHealthProbeIdleMin = env.Int("CHANNEL_HEALTH_PROBE_IDLE_MIN", 180)
+
+	// ChannelHealthProbeMaxPerRun caps how many channels a single prober tick
+	// refreshes, so a large fleet is spread across ticks instead of bursting.
+	//
+	// Environment variable: CHANNEL_HEALTH_PROBE_MAX_PER_RUN
+	// Default: 8
+	ChannelHealthProbeMaxPerRun = env.Int("CHANNEL_HEALTH_PROBE_MAX_PER_RUN", 8)
+
+	// ChannelHealthProbeConcurrency bounds simultaneous probe requests.
+	//
+	// Environment variable: CHANNEL_HEALTH_PROBE_CONCURRENCY
+	// Default: 4
+	ChannelHealthProbeConcurrency = env.Int("CHANNEL_HEALTH_PROBE_CONCURRENCY", 4)
+
+	// ChannelHealthProbeFrequency is how often the background health prober runs.
+	// Set to 0 to disable it.
+	//
+	// Environment variable: CHANNEL_HEALTH_PROBE_FREQUENCY
+	// Default: 60 (1 hour)
+	// Unit: minutes
+	ChannelHealthProbeFrequency = env.Int("CHANNEL_HEALTH_PROBE_FREQUENCY", 60)
+
+	// ChannelAutoRecoverEnabled re-enables auto-disabled channels once the health
+	// engine has seen ChannelAutoRecoverConsecutive clean probes. This is separate
+	// from AutomaticEnableChannelEnabled, which re-enables on any single clean
+	// test.
+	//
+	// Environment variable: CHANNEL_AUTO_RECOVER_ENABLED
+	// Default: true
+	ChannelAutoRecoverEnabled = env.Bool("CHANNEL_AUTO_RECOVER_ENABLED", true)
+
+	// ChannelAutoRecoverConsecutive is how many consecutive clean probes are
+	// required before an auto-disabled channel is re-enabled.
+	//
+	// Environment variable: CHANNEL_AUTO_RECOVER_CONSECUTIVE
+	// Default: 2
+	ChannelAutoRecoverConsecutive = env.Int("CHANNEL_AUTO_RECOVER_CONSECUTIVE", 2)
 
 	// ChannelSuspendBackoffBase is the initial suspension duration used by the
 	// exponential-backoff circuit breaker. Each consecutive failure multiplies

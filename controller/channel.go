@@ -233,6 +233,10 @@ func GetAllChannels(c *gin.Context) {
 		return
 	}
 
+	// Attach the live health score the router is currently gating on, so the
+	// admin list reflects routing reality rather than a separate view of it.
+	model.AttachHealthSnapshots(channels)
+
 	// Get total count for pagination
 	totalCount, err := model.GetChannelCount()
 	if err != nil {
@@ -262,10 +266,24 @@ func SearchChannels(c *gin.Context) {
 		helper.RespondError(c, err)
 		return
 	}
+	model.AttachHealthSnapshots(channels)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    channels,
+	})
+}
+
+// GetChannelHealth returns the live health snapshot for every channel the
+// health engine has an observation for, worst-scoring first.
+//
+// This exists alongside the health field embedded in the channel list so the UI
+// can refresh scores on a timer without refetching whole channel records.
+func GetChannelHealth(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    model.ChannelHealthSnapshots(),
 	})
 }
 

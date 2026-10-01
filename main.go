@@ -112,18 +112,25 @@ func main() {
 	if config.MemoryCacheEnabled {
 		go model.SyncOptions(config.SyncFrequency)
 		go model.SyncChannelCache(config.SyncFrequency)
-		go model.CleanExpiredSuspensions()
+		model.StartChannelHealthJanitor()
 	}
 	mcp.StartAutoSync(ctx)
 	if config.ChannelTestFrequency > 0 {
 		go controller.AutomaticallyTestChannels(config.ChannelTestFrequency)
+	}
+	// The health prober refreshes the scores that channel selection gates on.
+	// It is separate from the legacy auto-disabled channel test above: that one
+	// only revisits channels already taken out of rotation, whereas this one
+	// also refreshes enabled channels whose live traffic has gone quiet.
+	if config.MemoryCacheEnabled && config.ChannelHealthProbeFrequency > 0 {
+		go controller.AutomaticallyProbeChannelHealth(ctx, config.ChannelHealthProbeFrequency)
 	}
 	if config.BatchUpdateEnabled {
 		logger.Logger.Info("batch update enabled with interval " + strconv.Itoa(config.BatchUpdateInterval) + "s")
 		model.InitBatchUpdater()
 	}
 	if config.EnableMetric {
-		logger.Logger.Info("metric enabled, will disable channel if too much request failed")
+		logger.Logger.Info("metric enabled")
 	}
 
 	// Initialize monitoring

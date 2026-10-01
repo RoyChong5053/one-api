@@ -96,6 +96,17 @@ const (
 	// Set by: adaptors that parse output audio payloads (e.g., base64 audio responses).
 	// Read in: controllers to apply per-second audio billing when output audio is produced.
 	OutputAudioSeconds = "output_audio_seconds"
+	// UpstreamFirstByteAt records when the first byte of the upstream response body
+	// arrived (time.Time). Stamped by the response-body wrapper in relay/adaptor.
+	// Set by: relay/adaptor.DoRequest.
+	// Read in: controller/relay.go to derive time-to-first-token for channel health.
+	// Measuring here rather than on the client writer keeps the signal independent
+	// of client-side buffering, which would otherwise report end-of-stream as TTFT.
+	UpstreamFirstByteAt = "upstream_first_byte_at"
+	// RelayCompletionTokens stores the completion token count reported upstream.
+	// Set by: relay/controller after a successful DoResponse.
+	// Read in: controller/relay.go to derive generation throughput for channel health.
+	RelayCompletionTokens = "relay_completion_tokens"
 	// OutputAudioTokens stores the output audio token count when per-token billing is required.
 	// Set by: adaptors that parse output audio usage details.
 	// Read in: controllers to apply fallback audio billing when duration is unavailable.

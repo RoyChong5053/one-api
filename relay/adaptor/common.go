@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Laisky/errors/v2"
@@ -192,6 +193,16 @@ func DoRequest(c *gin.Context, req *http.Request) (*http.Response, error) {
 	// Optionally: Record when first response is received from upstream (non-standard event)
 	tracing.RecordTraceTimestamp(c, model.TimestampFirstUpstreamResponse)
 
+	// Stamp the arrival of the first body byte so the health engine can derive
+	// time-to-first-token. Wrapping resp.Body here is deliberate: DoRequest is
+	// the single choke point every adaptor funnels through, and measuring on the
+	// upstream side keeps the signal independent of client-side buffering — for
+	// buffered-stream models the client only observes bytes at commit time, which
+	// is the end of the stream rather than the first token.
+	if resp.Body != nil {
+		resp.Body = &firstByteStampingBody{ReadCloser: resp.Body, c: c}
+	}
+
 	if req.Body != nil {
 		_ = req.Body.Close()
 	}
@@ -200,4 +211,20 @@ func DoRequest(c *gin.Context, req *http.Request) (*http.Response, error) {
 	}
 
 	return resp, nil
+}
+
+// firstByteStampingBody records the time the first upstream body byte becomes
+// available, once. It is a thin pass-through otherwise.
+type firstByteStampingBody struct {
+	io.ReadCloser
+	c       *gin.Context
+	stamped atomic.Bool
+}
+
+func (b *firstByteStampingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 && b.stamped.CompareAndSwap(false, true) {
+		b.c.Set(ctxkey.UpstreamFirstByteAt, time.Now())
+	}
+	return n, err
 }
