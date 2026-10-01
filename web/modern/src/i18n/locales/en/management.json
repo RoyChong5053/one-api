@@ -24,7 +24,8 @@
       "status": "Status",
       "testing_model": "Testing Model",
       "type": "Type",
-      "weight": "Weight"
+      "weight": "Weight",
+      "weight_input_label": "Weight for {{name}}"
     },
     "confirm": {
       "delete": "Are you sure you want to delete this channel?",
@@ -556,7 +557,8 @@
       "test_success": "Channel test successful.",
       "testing_model_failed_message": "Failed to update testing model",
       "testing_model_failed_title": "Save failed",
-      "testing_model_saved": "Testing model saved."
+      "testing_model_saved": "Testing model saved.",
+      "weight_saved": "Weight updated."
     },
     "response": {
       "not_tested": "Not tested",
@@ -570,7 +572,9 @@
     "status": {
       "active": "Active",
       "disabled": "Disabled",
-      "paused": "Paused"
+      "paused": "Paused",
+      "auto_disabled": "Auto-disabled",
+      "unknown": "Unknown"
     },
     "testing": {
       "auto": "CHEAPEST"
@@ -585,9 +589,39 @@
       "refresh_balances": "Refresh All Balances",
       "refresh_balances_mobile": "Refresh Balances",
       "test_all": "Test All",
-      "test_all_mobile": "Test All Channels"
+      "test_all_mobile": "Test All Channels",
+      "toggle_view": "Switch between card and table layout",
+      "view_cards": "Cards",
+      "view_table": "Table"
     },
-    "type_unknown": "Type {{type}}"
+    "type_unknown": "Type {{type}}",
+    "health": {
+      "band_healthy": "Healthy",
+      "band_degraded": "Degraded",
+      "band_unhealthy": "Unhealthy",
+      "band_unknown": "Unmeasured",
+      "label": "Health",
+      "latency": "Latency",
+      "latency_title": "Average time for a full request to complete",
+      "model_count": "{{count}} models",
+      "no_samples": "no samples yet",
+      "rate_limit_rate": "Rate limited",
+      "cut_rate": "Cut rate",
+      "cut_rate_title": "Streams that ended before a final finish_reason",
+      "samples_one": "{{count}} sample",
+      "samples_other": "{{count}} samples",
+      "success_rate": "Success",
+      "tooltip_consecutive_failures": "{{count}} consecutive failure(s)",
+      "tooltip_no_samples": "Not enough traffic to judge this channel yet",
+      "tooltip_reasons": "Penalised for: {{reasons}}",
+      "tooltip_score": "Health score {{score}}/100",
+      "tooltip_suspended": "Temporarily removed from selection by the circuit breaker",
+      "tps": "Tokens/s",
+      "tps_title": "Average generation speed; very low values mean the upstream is throttling",
+      "ttft": "First token",
+      "ttft_title": "Average time until the first token arrives",
+      "weight_hint": "Splits traffic between equally healthy channels. It cannot override health."
+    }
   },
   "redemptions": {
     "actions": {

@@ -24,7 +24,8 @@
       "status": "状态",
       "testing_model": "测试模型",
       "type": "类型",
-      "weight": "权重"
+      "weight": "权重",
+      "weight_input_label": "「{{name}}」的权重"
     },
     "confirm": {
       "delete": "确定要删除该渠道吗？",
@@ -556,7 +557,8 @@
       "test_success": "渠道测试成功。",
       "testing_model_failed_message": "更新测试模型失败",
       "testing_model_failed_title": "保存失败",
-      "testing_model_saved": "测试模型已保存。"
+      "testing_model_saved": "测试模型已保存。",
+      "weight_saved": "权重已更新。"
     },
     "response": {
       "not_tested": "尚未测试",
@@ -570,7 +572,9 @@
     "status": {
       "active": "运行中",
       "disabled": "已禁用",
-      "paused": "已暂停"
+      "paused": "已暂停",
+      "auto_disabled": "已自动禁用",
+      "unknown": "未知"
     },
     "testing": {
       "auto": "自动最便宜"
@@ -585,9 +589,39 @@
       "refresh_balances": "刷新所有余额",
       "refresh_balances_mobile": "刷新余额",
       "test_all": "测试全部",
-      "test_all_mobile": "测试所有渠道"
+      "test_all_mobile": "测试所有渠道",
+      "toggle_view": "切换卡片／表格视图",
+      "view_cards": "卡片",
+      "view_table": "表格"
     },
-    "type_unknown": "类型 {{type}}"
+    "type_unknown": "类型 {{type}}",
+    "health": {
+      "band_healthy": "健康",
+      "band_degraded": "降级",
+      "band_unhealthy": "不健康",
+      "band_unknown": "未测量",
+      "label": "健康分",
+      "latency": "延迟",
+      "latency_title": "完整请求的平均耗时",
+      "model_count": "{{count}} 个模型",
+      "no_samples": "尚无样本",
+      "rate_limit_rate": "限流",
+      "cut_rate": "掐流率",
+      "cut_rate_title": "在最终 finish_reason 之前就断掉的流",
+      "samples_one": "{{count}} 个样本",
+      "samples_other": "{{count}} 个样本",
+      "success_rate": "成功率",
+      "tooltip_consecutive_failures": "连续失败 {{count}} 次",
+      "tooltip_no_samples": "样本不足，暂无法判定",
+      "tooltip_reasons": "扣分原因：{{reasons}}",
+      "tooltip_score": "健康分 {{score}}/100",
+      "tooltip_suspended": "已被熔断器暂时移出选择范围",
+      "tps": "tokens/秒",
+      "tps_title": "平均生成速度；数值极低代表上游在限速",
+      "ttft": "首字延迟",
+      "ttft_title": "收到第一个 token 的平均时间",
+      "weight_hint": "只在同样健康的渠道之间分配流量，无法凌驾于健康判定之上"
+    }
   },
   "redemptions": {
     "actions": {

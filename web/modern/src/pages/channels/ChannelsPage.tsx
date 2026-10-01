@@ -16,10 +16,12 @@ import { useResponsive } from '@/hooks/useResponsive';
 import { api } from '@/lib/api';
 import { cn, formatTimestamp } from '@/lib/utils';
 import type { ColumnDef } from '@tanstack/react-table';
-import { Ban, Banknote, CheckCircle, ChevronDown, Copy, FlaskConical, Plus, RefreshCw, Settings, Trash2 } from 'lucide-react';
+import { Ban, Banknote, CheckCircle, ChevronDown, Copy, FlaskConical, LayoutGrid, Plus, RefreshCw, Rows, Settings, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { type ChannelHealth } from './components/ChannelHealthBadge';
+import { ChannelCard } from './components/ChannelCard';
 import { resolveChannelColor } from './utils/colorGenerator';
 
 interface Channel {
@@ -39,6 +41,25 @@ interface Channel {
   testing_model?: string | null;
   balance?: number;
   balance_updated_time?: number;
+  health?: ChannelHealth | null;
+}
+
+type ChannelViewMode = 'cards' | 'table';
+
+const CHANNEL_VIEW_MODE_KEY = 'channels.view_mode';
+
+/**
+ * readStoredViewMode returns the operator's last layout choice, defaulting to
+ * cards. Cards are the default because the table needs twelve columns to stay
+ * legible and therefore overflows on ordinary laptop widths.
+ */
+function readStoredViewMode(): ChannelViewMode {
+  try {
+    const stored = window.localStorage.getItem(CHANNEL_VIEW_MODE_KEY);
+    return stored === 'table' ? 'table' : 'cards';
+  } catch {
+    return 'cards';
+  }
 }
 
 /**
@@ -161,8 +182,18 @@ export function ChannelsPage() {
   const [bulkTesting, setBulkTesting] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [refreshingBalanceIds, setRefreshingBalanceIds] = useState<Set<number>>(new Set());
+  const [viewMode, setViewMode] = useState<ChannelViewMode>(() => readStoredViewMode());
   const initializedRef = useRef(false);
   const skipFirstSortEffect = useRef(true);
+
+  const switchViewMode = (next: ChannelViewMode) => {
+    setViewMode(next);
+    try {
+      window.localStorage.setItem(CHANNEL_VIEW_MODE_KEY, next);
+    } catch {
+      // A blocked localStorage must not prevent the layout from switching.
+    }
+  };
 
   const getChannelTypeLabel = (type: number) => {
     return (
@@ -188,8 +219,22 @@ export function ChannelsPage() {
   };
 
   const renderStatusBadge = (status: number, priority?: number) => {
+    // status 2 is a manual disable, status 3 is an automatic one. Both must
+    // render as not-active: previously only status 2 was checked, so an
+    // auto-disabled channel showed a green "Active" badge whenever its
+    // priority happened to be non-negative.
     if (status === 2) {
       return <Badge variant="destructive">{t('channels.status.disabled')}</Badge>;
+    }
+    if (status === 3) {
+      return (
+        <Badge variant="outline" className="border-warning-border bg-warning-muted text-warning-foreground">
+          {t('channels.status.auto_disabled')}
+        </Badge>
+      );
+    }
+    if (status !== 1) {
+      return <Badge variant="outline">{t('channels.status.unknown')}</Badge>;
     }
     if ((priority ?? 0) < 0) {
       return (
@@ -378,7 +423,11 @@ export function ChannelsPage() {
           newData[index] = {
             ...newData[index],
             response_time: time * 1000,
-            test_time: Date.now(),
+            // test_time is unix seconds everywhere else in this codebase (the
+            // API returns seconds and TimestampDisplay callers multiply by
+            // 1000). Writing Date.now() here put milliseconds into that field
+            // and rendered a just-tested channel as a date far in the future.
+            test_time: Math.floor(Date.now() / 1000),
           };
           setData(newData);
         }
@@ -531,19 +580,29 @@ export function ChannelsPage() {
     }
   };
 
-  const handlePriorityUpdate = async (channel: Channel, newPriority: number) => {
-    if ((channel.priority ?? 0) === newPriority) return;
+  /**
+   * handleRoutingFieldUpdate writes a single numeric routing field. Priority
+   * and weight share one endpoint and one code path; only the payload key
+   * differs, so the card layout can reuse this rather than duplicating the
+   * request, the optimistic patch and the error handling.
+   */
+  const handleRoutingFieldUpdate = async (channel: Channel, field: 'priority' | 'weight', value: number) => {
+    const current = field === 'priority' ? (channel.priority ?? 0) : (channel.weight ?? 0);
+    if (current === value) return;
     try {
       const res = await api.put('/api/channel/', {
         id: channel.id,
         name: channel.name,
-        priority: newPriority,
+        [field]: value,
       });
       if (res.data?.success) {
-        setData((prev) => prev.map((row) => (row.id === channel.id ? { ...row, priority: newPriority } : row)));
+        setData((prev) => prev.map((row) => (row.id === channel.id ? { ...row, [field]: value } : row)));
         notify({
           type: 'success',
-          message: t('channels.notifications.priority_saved', 'Priority updated.'),
+          message:
+            field === 'priority'
+              ? t('channels.notifications.priority_saved', 'Priority updated.')
+              : t('channels.notifications.weight_saved', 'Weight updated.'),
         });
       } else {
         notify({
@@ -553,13 +612,17 @@ export function ChannelsPage() {
         });
       }
     } catch (error) {
-      console.error('Failed to update priority:', error);
+      console.error(`Failed to update ${field}:`, error);
       notify({
         type: 'error',
         title: t('channels.notifications.priority_failed_title', 'Update failed'),
         message: error instanceof Error ? error.message : t('channels.notifications.priority_failed_message', 'Failed to update priority.'),
       });
     }
+  };
+
+  const handlePriorityUpdate = async (channel: Channel, newPriority: number) => {
+    handleRoutingFieldUpdate(channel, 'priority', newPriority);
   };
 
   const handleBulkStatus = async (status: 1 | 2) => {
@@ -776,7 +839,7 @@ export function ChannelsPage() {
         const ch = row.original;
         const refreshing = refreshingBalanceIds.has(ch.id);
         const formatted = typeof ch.balance === 'number' ? ch.balance.toFixed(2) : '-';
-        const updatedAt = ch.balance_updated_time ? ch.balance_updated_time * 1000 : null;
+        const updatedAt = ch.balance_updated_time ? ch.balance_updated_time : null;
         return (
           <div className="flex items-center gap-2">
             <div className="font-mono text-sm">{formatted}</div>
@@ -1004,6 +1067,16 @@ export function ChannelsPage() {
           <Trash2 className="h-4 w-4" />
           {isMobile ? t('channels.toolbar.delete_disabled_mobile') : t('channels.toolbar.delete_disabled')}
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => switchViewMode(viewMode === 'cards' ? 'table' : 'cards')}
+          className={cn('gap-2 whitespace-nowrap', isMobile ? 'touch-target' : '')}
+          title={t('channels.toolbar.toggle_view', 'Switch between card and table layout')}
+        >
+          {viewMode === 'cards' ? <Rows className="h-4 w-4" /> : <LayoutGrid className="h-4 w-4" />}
+          {viewMode === 'cards' ? t('channels.toolbar.view_table', 'Table') : t('channels.toolbar.view_cards', 'Cards')}
+        </Button>
       </div>
     </div>
   );
@@ -1029,12 +1102,39 @@ export function ChannelsPage() {
             <EnhancedDataTable
               columns={columns}
               data={data}
+              cardLayout={viewMode === 'cards' ? 'always' : 'never'}
+              renderCard={
+                viewMode === 'cards'
+                  ? (row) => (
+                      <ChannelCard
+                        channel={row}
+                        typeLabel={getChannelTypeLabel(row.type)}
+                        typeColor={resolveChannelColor(CHANNEL_TYPES[row.type]?.color, row.type)}
+                        refreshingBalance={refreshingBalanceIds.has(row.id)}
+                        onEdit={() => navigate(`/channels/edit/${row.id}`)}
+                        onDuplicate={() => duplicateChannel(row)}
+                        onToggleStatus={() => manage(row.id, row.status === 1 ? 'disable' : 'enable')}
+                        onTest={() => {
+                          const idx = data.findIndex((c) => c.id === row.id);
+                          manage(row.id, 'test', idx !== -1 ? idx : undefined);
+                        }}
+                        onDelete={() => manage(row.id, 'delete')}
+                        onRefreshBalance={() => {
+                          void handleBalanceRefresh(row);
+                        }}
+                        onPriorityChange={(value, field) =>
+                          handleRoutingFieldUpdate(row, field === 'weight' ? 'weight' : 'priority', value)
+                        }
+                      />
+                    )
+                  : undefined
+              }
               floatingRowActions={(row) => (
-                <div className="flex items-center gap-1">
-                  <ListActionButton
-                    onClick={() => navigate(`/channels/edit/${row.id}`)}
-                    title={t('channels.actions.edit')}
-                    aria-label={t('channels.actions.edit')}
+                    <div className="flex items-center gap-1">
+                      <ListActionButton
+                        onClick={() => navigate(`/channels/edit/${row.id}`)}
+                        title={t('channels.actions.edit')}
+                        aria-label={t('channels.actions.edit')}
                     icon={<Settings className="h-4 w-4" />}
                   />
                   <ListActionButton

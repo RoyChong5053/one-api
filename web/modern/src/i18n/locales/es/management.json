@@ -24,7 +24,8 @@
       "status": "Estado",
       "testing_model": "Modelo de prueba",
       "type": "Tipo",
-      "weight": "Peso"
+      "weight": "Peso",
+      "weight_input_label": "Peso de {{name}}"
     },
     "confirm": {
       "delete": "¿Seguro que deseas eliminar este canal?",
@@ -556,7 +557,8 @@
       "test_success": "Prueba del canal exitosa.",
       "testing_model_failed_message": "No se pudo actualizar el modelo de prueba",
       "testing_model_failed_title": "Error al guardar",
-      "testing_model_saved": "Modelo de prueba guardado."
+      "testing_model_saved": "Modelo de prueba guardado.",
+      "weight_saved": "Peso actualizado."
     },
     "response": {
       "not_tested": "No probado",
@@ -570,7 +572,9 @@
     "status": {
       "active": "Activo",
       "disabled": "Deshabilitado",
-      "paused": "En pausa"
+      "paused": "En pausa",
+      "auto_disabled": "Deshabilitado automáticamente",
+      "unknown": "Desconocido"
     },
     "testing": {
       "auto": "MÁS ECONÓMICO"
@@ -585,9 +589,39 @@
       "refresh_balances": "Actualizar todos los saldos",
       "refresh_balances_mobile": "Actualizar saldos",
       "test_all": "Probar todo",
-      "test_all_mobile": "Probar todos los canales"
+      "test_all_mobile": "Probar todos los canales",
+      "toggle_view": "Cambiar entre vista de tarjetas y tabla",
+      "view_cards": "Tarjetas",
+      "view_table": "Tabla"
     },
-    "type_unknown": "Tipo {{type}}"
+    "type_unknown": "Tipo {{type}}",
+    "health": {
+      "band_healthy": "Saludable",
+      "band_degraded": "Degradado",
+      "band_unhealthy": "No saludable",
+      "band_unknown": "Sin medir",
+      "label": "Salud",
+      "latency": "Latencia",
+      "latency_title": "Tiempo medio de una petición completa",
+      "model_count": "{{count}} modelos",
+      "no_samples": "aún sin muestras",
+      "rate_limit_rate": "Limitado",
+      "cut_rate": "Tasa de corte",
+      "cut_rate_title": "Flujos terminados antes de un finish_reason final",
+      "samples_one": "{{count}} muestra",
+      "samples_other": "{{count}} muestras",
+      "success_rate": "Éxito",
+      "tooltip_consecutive_failures": "{{count}} fallo(s) consecutivos",
+      "tooltip_no_samples": "Traffic insufficient para juzgar este canal",
+      "tooltip_reasons": "Penalizado por: {{reasons}}",
+      "tooltip_score": "Puntuación de salud {{score}}/100",
+      "tooltip_suspended": "Retirado temporalmente de la selección por el cortacircuitos",
+      "tps": "Tokens/s",
+      "tps_title": "Velocidad media de generación; valores muy bajos indican limitación upstream",
+      "ttft": "Primer token",
+      "ttft_title": "Tiempo medio hasta el primer token",
+      "weight_hint": "Reparte tráfico entre canales igual de saludables. No puede anular la salud."
+    }
   },
   "redemptions": {
     "actions": {

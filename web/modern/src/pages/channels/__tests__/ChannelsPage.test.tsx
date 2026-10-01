@@ -34,6 +34,26 @@ vi.mock('react-router-dom', async () => {
   };
 });
 
+/**
+ * setChannelViewMode forces the page into a specific layout. The page defaults
+ * to cards, so tests that want the table have to opt into it explicitly.
+ */
+const setChannelViewMode = (mode: 'cards' | 'table') => {
+  window.localStorage.setItem('channels.view_mode', mode);
+};
+
+/**
+ * findChannelRow locates a channel's row without assuming a layout. Both the
+ * table row and the card carry data-testid="data-row", so these tests keep
+ * working whichever view is active.
+ */
+const findChannelRow = async (name: string) => {
+  const nameCell = await screen.findByText(name);
+  const row = nameCell.closest('[data-testid="data-row"]');
+  expect(row).not.toBeNull();
+  return row as HTMLElement;
+};
+
 const mockApiGet = vi.mocked(api.get);
 const mockApiPost = vi.mocked(api.post);
 const mockApiDelete = vi.mocked(api.delete);
@@ -62,6 +82,11 @@ describe('ChannelsPage Pagination', () => {
     vi.clearAllMocks();
     // Clear localStorage to ensure consistent page size defaults
     localStorage.clear();
+    // Reset the URL as well. ChannelsPage seeds its page index from the ?p=
+    // query param, and BrowserRouter reads whatever location jsdom is
+    // currently at -- which the previous test's navigation left behind. Without
+    // this, any test running after the page-navigation test starts on page 2.
+    window.history.replaceState(null, '', '/');
     mockApiGet.mockResolvedValue({ data: mockChannelsData });
     mockApiPost.mockResolvedValue({ data: { success: true } });
     mockApiDelete.mockResolvedValue({ data: { success: true } });
@@ -147,6 +172,9 @@ describe('ChannelsPage Pagination', () => {
   });
 
   it('should handle sorting without duplicate calls', async () => {
+    // Column headers only exist in the table layout, so this test opts in
+    // explicitly rather than relying on the default view.
+    setChannelViewMode('table');
     renderChannelsPage();
 
     // Wait for initial load
@@ -198,11 +226,9 @@ describe('ChannelsPage Pagination', () => {
     renderChannelsPage();
     const user = userEvent.setup();
 
-    const nameCell = await screen.findByText('Channel 1');
-    const row = nameCell.closest('tr');
+    const row = await findChannelRow('Channel 1');
 
-    expect(row).not.toBeNull();
-    await user.click(within(row as HTMLElement).getByRole('button', { name: 'Delete' }));
+    await user.click(within(row).getByRole('button', { name: 'Delete' }));
 
     const dialog = await screen.findByRole('dialog');
 
@@ -218,11 +244,9 @@ describe('ChannelsPage Pagination', () => {
     renderChannelsPage();
     const user = userEvent.setup();
 
-    const nameCell = await screen.findByText('Channel 1');
-    const row = nameCell.closest('tr');
+    const row = await findChannelRow('Channel 1');
 
-    expect(row).not.toBeNull();
-    await user.click(within(row as HTMLElement).getByRole('button', { name: 'Delete' }));
+    await user.click(within(row).getByRole('button', { name: 'Delete' }));
 
     const dialog = await screen.findByRole('dialog');
     await user.click(within(dialog).getByRole('button', { name: 'Confirm' }));

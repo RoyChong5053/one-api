@@ -24,7 +24,8 @@
       "status": "状態",
       "testing_model": "テスト用モデル",
       "type": "タイプ",
-      "weight": "重み"
+      "weight": "重み",
+      "weight_input_label": "{{name}} の重み"
     },
     "confirm": {
       "delete": "このチャンネルを削除してよろしいですか？",
@@ -556,7 +557,8 @@
       "test_success": "チャンネルのテストに成功しました。",
       "testing_model_failed_message": "テスト用モデルの更新に失敗しました",
       "testing_model_failed_title": "保存に失敗しました",
-      "testing_model_saved": "テスト用モデルを保存しました。"
+      "testing_model_saved": "テスト用モデルを保存しました。",
+      "weight_saved": "重みを更新しました。"
     },
     "response": {
       "not_tested": "未テスト",
@@ -570,7 +572,9 @@
     "status": {
       "active": "有効",
       "disabled": "無効",
-      "paused": "一時停止"
+      "paused": "一時停止",
+      "auto_disabled": "自動無効",
+      "unknown": "不明"
     },
     "testing": {
       "auto": "最安"
@@ -585,9 +589,39 @@
       "refresh_balances": "全残高を更新",
       "refresh_balances_mobile": "残高を更新",
       "test_all": "すべてテスト",
-      "test_all_mobile": "全チャンネルをテスト"
+      "test_all_mobile": "全チャンネルをテスト",
+      "toggle_view": "カード／テーブル表示を切り替え",
+      "view_cards": "カード",
+      "view_table": "テーブル"
     },
-    "type_unknown": "タイプ {{type}}"
+    "type_unknown": "タイプ {{type}}",
+    "health": {
+      "band_healthy": "正常",
+      "band_degraded": "劣化",
+      "band_unhealthy": "異常",
+      "band_unknown": "未計測",
+      "label": "ヘルス",
+      "latency": "レイテンシ",
+      "latency_title": "リクエスト全体の平均応答時間",
+      "model_count": "{{count}} モデル",
+      "no_samples": "サンプルなし",
+      "rate_limit_rate": "レート制限",
+      "cut_rate": "切断率",
+      "cut_rate_title": "最終 finish_reason 前に途切れたストリーム",
+      "samples_one": "{{count}} サンプル",
+      "samples_other": "{{count}} サンプル",
+      "success_rate": "成功率",
+      "tooltip_consecutive_failures": "連続失敗 {{count}} 回",
+      "tooltip_no_samples": "判定にはトラフィックが不足しています",
+      "tooltip_reasons": "減点理由: {{reasons}}",
+      "tooltip_score": "ヘルススコア {{score}}/100",
+      "tooltip_suspended": "サーキットブレーカーにより一時的に選択対象から外れています",
+      "tps": "トークン/秒",
+      "tps_title": "平均生成速度。極端に低い場合は上流が制限しています",
+      "ttft": "最初のトークン",
+      "ttft_title": "最初のトークンまでの平均時間",
+      "weight_hint": "同等に正常なチャネル間でトラフィックを分配します。ヘルスを上書きはできません。"
+    }
   },
   "redemptions": {
     "actions": {

@@ -51,6 +51,27 @@ export interface EnhancedDataTableProps<TData, TValue> {
   hideColumnsOnMobile?: string[];
   compactMode?: boolean;
 
+  /**
+   * cardLayout selects how rows are presented.
+   *  - 'never'  always the table, including on phones
+   *  - 'mobile' table on wider viewports, cards on phones (legacy default)
+   *  - 'always' cards at every width
+   *
+   * 'always' exists because a table wide enough to be legible forces
+   * horizontal scrolling on ordinary laptop screens, which pushes fields off
+   * the edge where they cannot be read without zooming out.
+   */
+  cardLayout?: 'never' | 'mobile' | 'always';
+  /**
+   * renderCard supplies a purpose-built card for one row. Only consulted when
+   * cards are actually being rendered. Without it the generic label/value
+   * stack below is used, which works for any table but reads as a form rather
+   * than a summary.
+   */
+  renderCard?: (row: TData) => React.ReactNode;
+  /** Extra classes applied to the card grid container. */
+  cardGridClassName?: string;
+
   loading?: boolean;
   className?: string;
   emptyMessage?: string;
@@ -83,6 +104,9 @@ export function EnhancedDataTable<TData, TValue>({
   mobileCardLayout = true,
   hideColumnsOnMobile = [],
   compactMode = false,
+  cardLayout,
+  renderCard,
+  cardGridClassName,
   loading = false,
   className,
   emptyMessage,
@@ -91,6 +115,10 @@ export function EnhancedDataTable<TData, TValue>({
   const { isMobile, isTablet } = useResponsive();
   // Client-side sorting state (for display only when no server-side sorting)
   const [sorting, setSorting] = React.useState<SortingState>([]);
+
+  // An explicit cardLayout wins over the legacy boolean.
+  const effectiveCardLayout: 'never' | 'mobile' | 'always' = cardLayout ?? (mobileCardLayout ? 'mobile' : 'never');
+  const showCards = effectiveCardLayout === 'always' || (effectiveCardLayout === 'mobile' && isMobile);
 
   // Default values with translation
   const effectiveSearchPlaceholder = searchPlaceholder || t('common.search_placeholder', 'Search...');
@@ -314,11 +342,18 @@ export function EnhancedDataTable<TData, TValue>({
           </div>
         )}
 
-        {/* Mobile Card Layout */}
-        {isMobile && mobileCardLayout ? (
-          <div className="space-y-4">
+        {/* Card Layout (phone-only by default, all widths when cardLayout="always") */}
+        {showCards ? (
+          <div className={cn(cardGridClassName ?? 'space-y-4', renderCard && 'grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4')}>
             {table.getRowModel().rows?.length ? (
-              table.getRowModel().rows.map((row) => (
+              table.getRowModel().rows.map((row) => {
+                // A caller-supplied card replaces the generic label/value
+                // stack entirely.
+                if (renderCard) {
+                  return <React.Fragment key={row.id}>{renderCard(row.original)}</React.Fragment>;
+                }
+
+                return (
                 <div
                   key={row.id}
                   className={cn(
@@ -348,7 +383,8 @@ export function EnhancedDataTable<TData, TValue>({
                     );
                   })}
                 </div>
-              ))
+                );
+              })
             ) : (
               <div className="bg-card border rounded-lg p-8 text-center">
                 <div className="text-muted-foreground">{loading ? t('common.loading', 'Loading...') : effectiveEmptyMessage}</div>
@@ -385,6 +421,7 @@ export function EnhancedDataTable<TData, TValue>({
                       <TableRow
                         key={row.id}
                         data-state={row.getIsSelected() && 'selected'}
+                        data-testid="data-row"
                         className={cn('hover:bg-muted/50 transition-colors', onRowClick && 'cursor-pointer')}
                         onClick={() => onRowClick?.(row.original)}
                         onMouseEnter={(e) => handleRowMouseEnter(e, row.original)}
