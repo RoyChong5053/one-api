@@ -117,6 +117,12 @@ type HealthSnapshot struct {
 	Suspended           bool    `json:"suspended"`
 	SuspendUntil        int64   `json:"suspend_until"`
 	UpdatedTime         int64   `json:"updated_time"`
+	// LinkReachable/LinkRTTMs are the cached TCP link-probe result for
+	// IP-literal upstreams. They are a hard selection gate and are never
+	// folded into the latency score. LinkChecked is false until measured.
+	LinkReachable bool    `json:"link_reachable"`
+	LinkRTTMs     float64 `json:"link_rtt_ms"`
+	LinkChecked   bool    `json:"link_checked"`
 	// Reasons lists the human-readable reasons the score is not 1.0, so the
 	// UI can explain a downgrade instead of just showing a number.
 	Reasons []string `json:"reasons"`
@@ -461,7 +467,9 @@ func GetChannelHealthSnapshot(channelId int) HealthSnapshot {
 	h := getOrCreateChannelHealth(channelId)
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.snapshotLocked(channelId)
+	snapshot := h.snapshotLocked(channelId)
+	applyLinkSnapshot(&snapshot, channelId)
+	return snapshot
 }
 
 func (h *channelHealth) snapshotLocked(channelId int) HealthSnapshot {
@@ -531,6 +539,7 @@ func ChannelHealthSnapshots() []HealthSnapshot {
 		if snapshot.Samples == 0 {
 			continue
 		}
+		applyLinkSnapshot(&snapshot, id)
 		snapshots = append(snapshots, snapshot)
 	}
 	sort.Slice(snapshots, func(i, j int) bool {

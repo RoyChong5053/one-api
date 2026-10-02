@@ -359,6 +359,9 @@ func ValidateAllEnvVars() *ValidationResult {
 	if err := ValidateNonNegativeInt("RELAY_TIMEOUT", RelayTimeout); err != nil {
 		result.Errors = append(result.Errors, err)
 	}
+	if err := ValidatePositiveInt("UPSTREAM_DIAL_TIMEOUT", UpstreamDialTimeout); err != nil {
+		result.Errors = append(result.Errors, err)
+	}
 	if err := ValidateNonNegativeInt("SYNC_FREQUENCY", SyncFrequency); err != nil {
 		result.Errors = append(result.Errors, err)
 	}

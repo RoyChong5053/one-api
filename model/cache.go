@@ -584,6 +584,12 @@ func CacheGetSatisfiedChannel(group string, model string, preferLowestPriority b
 		return nil, errors.Errorf("no channels in cache support model %s", model)
 	}
 
+	// Hard liveness gate: drop (and briefly suspend) candidates whose upstream
+	// IP endpoint is unreachable, so a dead channel that happens to be the only
+	// member of the top priority tier cannot absorb every request. Never moves
+	// the health score.
+	candidateChannels = filterLinkDead(group, model, candidateChannels)
+
 	endIdx := len(candidateChannels)
 	// choose by priority
 	if endIdx == 0 { // Should be caught by earlier check, but as a safeguard
@@ -732,6 +738,12 @@ func CacheGetSatisfiedChannelExcluding(group string, model string, preferLowestP
 			)
 		}
 	}
+
+	// Hard liveness gate: drop (and briefly suspend) candidates whose upstream
+	// IP endpoint is unreachable, so a dead channel that happens to be the only
+	// member of the top priority tier cannot absorb every request. Never moves
+	// the health score.
+	candidateChannels = filterLinkDead(group, model, candidateChannels)
 
 	// When preferLowestPriority is true, select from the lowest priority tier.
 	// When preferLowestPriority is false, select from the highest priority tier.

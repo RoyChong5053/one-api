@@ -852,6 +852,18 @@ var (
 	// Recommended: 300 for most use cases
 	RelayTimeout = env.Int("RELAY_TIMEOUT", 0)
 
+	// UpstreamDialTimeout bounds the TCP connect phase of outbound relay
+	// requests. Without it a blackholed upstream rides the OS SYN-retry budget
+	// (~127s on Linux with tcp_syn_retries=6), during which the caller usually
+	// gives up first and the failure is misclassified as a caller cancellation
+	// rather than a retryable channel failure. A dial timeout surfaces as a
+	// net.Error (i/o timeout), which the relay retries and can suspend on.
+	//
+	// Environment variable: UPSTREAM_DIAL_TIMEOUT
+	// Default: 5
+	// Unit: seconds
+	UpstreamDialTimeout = env.Int("UPSTREAM_DIAL_TIMEOUT", 5)
+
 	// BufferedStreamModels lists client-facing model names (comma-separated,
 	// case-insensitive) whose streaming responses are fully buffered before
 	// anything is written to the client. A provider that returns HTTP 200 but

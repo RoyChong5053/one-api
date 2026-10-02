@@ -83,6 +83,18 @@ func Init() {
 		}
 		if restrictExternal {
 			transport.DialContext = buildUserContentDialContext(proxyURL)
+		} else {
+			// Bound the TCP connect so a blackholed or wedged upstream fails
+			// fast instead of riding the OS SYN-retry budget. A dial timeout
+			// surfaces as a net.Error (i/o timeout), which the relay treats as
+			// a retryable channel failure — unlike a context deadline, which it
+			// classifies as a caller cancellation and refuses to retry or
+			// suspend on.
+			dialTimeout := time.Duration(config.UpstreamDialTimeout) * time.Second
+			if dialTimeout <= 0 {
+				dialTimeout = 5 * time.Second
+			}
+			transport.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
 		}
 		return transport
 	}
