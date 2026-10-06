@@ -8,6 +8,8 @@
       "duplicate": "Dupliquer",
       "edit": "Modifier",
       "enable": "Activer",
+      "favorite": "Épingler le canal",
+      "unfavorite": "Désépingler",
       "refresh_balance": "Actualiser le solde de {{name}}",
       "test": "Tester"
     },

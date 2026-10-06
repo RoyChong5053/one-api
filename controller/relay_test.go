@@ -284,14 +284,6 @@ func TestProcessChannelRelayError_InternalAdaptorFailureDoesNotSuspend(t *testin
 func TestProcessChannelRelayError_StatusTooManyRequests(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	// Save original config and restore after test
-	originalSuspendDuration := config.ChannelSuspendSecondsFor429
-	defer func() {
-		config.ChannelSuspendSecondsFor429 = originalSuspendDuration
-	}()
-
-	// Set test config
-	config.ChannelSuspendSecondsFor429 = 60 * time.Second
 
 	tests := []struct {
 		name          string
@@ -338,7 +330,7 @@ func TestProcessChannelRelayError_StatusTooManyRequests(t *testing.T) {
 				// This would normally call dbmodel.SuspendAbility
 				// We can verify the behavior by checking the logs or mocking the call
 				t.Logf("Would suspend ability for channel %d, model %s, group %s for %v",
-					channelId, originalModel, group, config.ChannelSuspendSecondsFor429)
+					channelId, originalModel, group, config.ChannelSuspendBackoffBase)
 			}
 
 			// For unit testing purposes, we verify the logic without side effects

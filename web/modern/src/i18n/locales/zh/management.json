@@ -8,6 +8,8 @@
       "duplicate": "复制",
       "edit": "编辑",
       "enable": "启用",
+      "favorite": "置顶渠道",
+      "unfavorite": "取消置顶",
       "refresh_balance": "刷新「{{name}}」余额",
       "test": "测试"
     },

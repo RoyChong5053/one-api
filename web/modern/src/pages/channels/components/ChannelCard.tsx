@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input';
 import { ListActionButton } from '@/components/ui/list-action-button';
 import { TimestampDisplay } from '@/components/ui/timestamp';
 import { cn } from '@/lib/utils';
-import { Ban, CheckCircle, Copy, FlaskConical, Gauge, Settings, Trash2, Zap } from 'lucide-react';
+import { Ban, CheckCircle, Copy, FlaskConical, Gauge, Settings, Star, Trash2, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -15,6 +15,7 @@ export interface ChannelCardData {
   name: string;
   type: number;
   status: number;
+  favorite?: boolean;
   priority?: number;
   weight?: number;
   balance?: number;
@@ -37,6 +38,7 @@ interface ChannelCardProps {
   onTest: () => void;
   onDelete: () => void;
   onRefreshBalance: () => void;
+  onToggleFavorite: () => void;
   onPriorityChange: (value: number, field: 'priority' | 'weight') => void;
 }
 
@@ -155,6 +157,7 @@ export function ChannelCard({
   onTest,
   onDelete,
   onRefreshBalance,
+  onToggleFavorite,
   onPriorityChange,
 }: ChannelCardProps) {
   const { t } = useTranslation();
@@ -217,6 +220,15 @@ export function ChannelCard({
             {typeColor && (
               <span className="inline-block h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: typeColor }} />
             )}
+            <button
+              type="button"
+              onClick={onToggleFavorite}
+              aria-label={t('channels.actions.favorite', 'Pin channel')}
+              title={channel.favorite ? t('channels.actions.unfavorite', 'Unpin channel') : t('channels.actions.favorite', 'Pin channel')}
+              className="flex-shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-yellow-500"
+            >
+              <Star className={cn('h-3.5 w-3.5', channel.favorite && 'fill-current text-yellow-500')} />
+            </button>
             <span className="truncate font-medium" title={channel.name}>
               {channel.name}
             </span>

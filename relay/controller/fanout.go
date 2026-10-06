@@ -229,16 +229,16 @@ func TryFanOutEmbedding(
 	}
 	wg.Wait()
 
-	// Use results from successful sub-requests even if some failed; only fall
-	// back to the single-channel path when every sub-request failed.
 	// Each outcome is reported to the circuit breaker so an offline node is
 	// suspended instead of receiving slices on every request.
 	reportCtx := gmw.Ctx(c)
 	var successful []fanOutEmbeddingResult
+	failed := 0
 	for _, r := range results {
 		reportFanoutSubRequest(reportCtx, group, modelName, r.channelId, r.err)
 		if r.err != nil {
-			lg.Warn("embedding fan-out sub-request failed, using partial results",
+			failed++
+			lg.Warn("embedding fan-out sub-request failed",
 				zap.Int("channel_id", r.channelId),
 				zap.String("channel_name", r.channelName),
 				zap.Int("doc_count", r.docCount),
@@ -253,8 +253,15 @@ func TryFanOutEmbedding(
 			zap.Int64("latency_ms", r.latencyMs))
 		successful = append(successful, r)
 	}
-	if len(successful) == 0 {
-		lg.Warn("all embedding fan-out sub-requests failed, falling back to single channel")
+	// Embedding results are positionally consumed: a merged set with one shard
+	// missing leaves the caller with fewer vectors than inputs, which silently
+	// breaks every downstream vector/document alignment. Correctness beats the
+	// partial work, so any failure falls the whole batch back to the
+	// single-channel path, where retry and circuit-breaking already apply.
+	if failed > 0 {
+		lg.Warn("embedding fan-out incomplete; falling back to single channel to keep the batch whole",
+			zap.Int("failed_shards", failed),
+			zap.Int("succeeded_shards", len(successful)))
 		return nil
 	}
 

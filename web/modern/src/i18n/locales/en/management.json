@@ -8,6 +8,8 @@
       "duplicate": "Duplicate",
       "edit": "Edit",
       "enable": "Enable",
+      "favorite": "Pin channel",
+      "unfavorite": "Unpin channel",
       "refresh_balance": "Refresh balance for {{name}}",
       "test": "Test"
     },

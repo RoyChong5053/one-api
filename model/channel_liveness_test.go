@@ -1,16 +1,9 @@
 package model
 
 import (
-	"net"
 	"testing"
 	"time"
 )
-
-func resetChannelLinkStore() {
-	channelLinkMu.Lock()
-	channelLinkStore = map[int]*channelLinkState{}
-	channelLinkMu.Unlock()
-}
 
 func strPtr(s string) *string { return &s }
 
@@ -38,87 +31,30 @@ func TestChannelLinkAddr(t *testing.T) {
 	}
 }
 
-func TestChannelLinkProbeAliveAndDead(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+func TestIsLocalIPChannel(t *testing.T) {
+	if IsLocalIPChannel(&Channel{BaseURL: strPtr("http://192.168.10.1:11436")}) != true {
+		t.Fatal("expected IP-literal channel to be local")
 	}
-	addr := ln.Addr().String()
-	ch := &Channel{Id: 42, BaseURL: strPtr("http://" + addr)}
-
-	alive, rtt := channelLinkProbe(ch, time.Second)
-	if !alive {
-		t.Fatalf("expected alive for %s", addr)
+	if IsLocalIPChannel(&Channel{BaseURL: strPtr("https://api.openai.com")}) != false {
+		t.Fatal("expected hostname channel not to be local")
 	}
-	if rtt <= 0 {
-		t.Fatalf("expected positive rtt, got %v", rtt)
-	}
-
-	_ = ln.Close()
-	if alive, _ := channelLinkProbe(ch, time.Second); alive {
-		t.Fatalf("expected dead after listener closed")
+	if IsLocalIPChannel(nil) != false {
+		t.Fatal("nil channel must not be local")
 	}
 }
 
-func TestFilterLinkDeadKeepsLastCandidate(t *testing.T) {
-	resetChannelLinkStore()
-	orig := suspendUnreachableLink
-	defer func() { suspendUnreachableLink = orig }()
-	suspended := 0
-	suspendUnreachableLink = func(group, model string, channelId int) error { suspended++; return nil }
+func TestChannelLinkSnapshotRoundTrip(t *testing.T) {
+	channelLinkMu.Lock()
+	channelLinkStore = map[int]*channelLinkState{}
+	channelLinkMu.Unlock()
 
-	// 127.0.0.1:1 is closed -> connection refused quickly.
-	ch := &Channel{Id: 100, Name: "dead", BaseURL: strPtr("http://127.0.0.1:1")}
-	out := filterLinkDead("default", "embedding", []*Channel{ch})
-	if len(out) != 1 {
-		t.Fatalf("expected the last candidate to be kept, got %d", len(out))
-	}
-	if suspended != 0 {
-		t.Fatalf("expected no suspend when it is the only candidate, got %d", suspended)
-	}
-}
-
-func TestFilterLinkDeadDropsDeadAndSuspends(t *testing.T) {
-	resetChannelLinkStore()
-	orig := suspendUnreachableLink
-	defer func() { suspendUnreachableLink = orig }()
-	var suspended []int
-	suspendUnreachableLink = func(group, model string, channelId int) error {
-		suspended = append(suspended, channelId)
-		return nil
+	if _, _, checked := ChannelLinkSnapshot(999); checked {
+		t.Fatal("expected unchecked before any measurement")
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	aliveCh := &Channel{Id: 201, Name: "alive", BaseURL: strPtr("http://" + ln.Addr().String())}
-	deadCh := &Channel{Id: 202, Name: "dead", BaseURL: strPtr("http://127.0.0.1:1")}
-
-	out := filterLinkDead("default", "embedding", []*Channel{aliveCh, deadCh})
-	if len(out) != 1 || out[0].Id != 201 {
-		t.Fatalf("expected only the alive channel, got %+v", out)
-	}
-	if len(suspended) != 1 || suspended[0] != 202 {
-		t.Fatalf("expected dead channel suspended once, got %v", suspended)
-	}
-}
-
-func TestFilterLinkDeadSkipsHostnameEndpoints(t *testing.T) {
-	resetChannelLinkStore()
-	orig := suspendUnreachableLink
-	defer func() { suspendUnreachableLink = orig }()
-	called := false
-	suspendUnreachableLink = func(group, model string, channelId int) error { called = true; return nil }
-
-	ch := &Channel{Id: 300, Name: "public", BaseURL: strPtr("https://api.example.com")}
-	out := filterLinkDead("default", "chat", []*Channel{ch})
-	if len(out) != 1 {
-		t.Fatalf("hostname endpoint must never be gated out")
-	}
-	if called {
-		t.Fatalf("hostname endpoint must never be suspended")
+	SetChannelLinkState(999, true, 3*time.Millisecond)
+	alive, rttMs, checked := ChannelLinkSnapshot(999)
+	if !checked || !alive || rttMs <= 0 {
+		t.Fatalf("unexpected snapshot: checked=%v alive=%v rttMs=%v", checked, alive, rttMs)
 	}
 }

@@ -368,3 +368,47 @@ func TestClassifyRelayError(t *testing.T) {
 		})
 	}
 }
+
+// TestResetChannelHealthToFullRestoresHealthyBand asserts that a channel whose
+// score has collapsed can be snapped back to a full, healthy verdict when it
+// answers a recovery probe, and that a subsequent failure is judged from the
+// cleared window rather than the old failure history.
+func TestResetChannelHealthToFullRestoresHealthyBand(t *testing.T) {
+	resetChannelHealthForTest(t)
+
+	// Drive the channel through a full window of failures.
+	for i := 0; i < config.ChannelHealthWindowSize; i++ {
+		RecordChannelObservation(7, ChannelObservation{Kind: OutcomeServerError, LatencyMs: 9000})
+	}
+	if band := GetChannelHealthBand(7); band == BandHealthy {
+		t.Fatalf("expected a non-healthy band before reset, got %s", band)
+	}
+	if !GetChannelHealthScoreBelowThreshold(7, 0.5) {
+		t.Fatal("expected score below the auto-disable threshold before reset")
+	}
+
+	ResetChannelHealthToFull(7)
+
+	if score := GetChannelHealthScore(7); score != 1.0 {
+		t.Fatalf("reset score = %v, want 1.0", score)
+	}
+	if band := GetChannelHealthBand(7); band != BandHealthy {
+		t.Fatalf("reset band = %s, want %s", band, BandHealthy)
+	}
+	if GetChannelHealthScoreBelowThreshold(7, 0.5) {
+		t.Fatal("a reset channel must not be reported below the threshold")
+	}
+
+	// A clean observation keeps it healthy.
+	recordSuccess(t, 7, 200)
+	if band := GetChannelHealthBand(7); band != BandHealthy {
+		t.Fatalf("band after clean observation = %s, want healthy", band)
+	}
+
+	// A single rate-limit after the reset must drop it back below the
+	// threshold, because the failure window was cleared.
+	RecordChannelObservation(7, ChannelObservation{Kind: OutcomeRateLimit, LatencyMs: 120})
+	if !GetChannelHealthScoreBelowThreshold(7, 0.5) {
+		t.Fatal("one rate limit after reset should drop the score below threshold")
+	}
+}

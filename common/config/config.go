@@ -369,14 +369,6 @@ var (
 // Channels represent connections to AI providers like OpenAI, Anthropic, etc.
 
 var (
-	// ChannelSuspendSecondsFor429 defines the per-ability suspension window after
-	// hitting upstream 429 (rate limiting) errors. The ability (model on channel)
-	// is temporarily paused to avoid further throttling.
-	//
-	// Environment variable: CHANNEL_SUSPEND_SECONDS_FOR_429
-	// Default: 60 seconds
-	ChannelSuspendSecondsFor429 = time.Second * time.Duration(env.Int("CHANNEL_SUSPEND_SECONDS_FOR_429", 60))
-
 	// ChannelSuspendSecondsFor5XX defines how long an ability is paused after
 	// upstream 5xx (server error) failures. Prevents hammering failing providers.
 	//
@@ -581,9 +573,48 @@ var (
 	// ChannelAutoRecoverConsecutive is how many consecutive clean probes are
 	// required before an auto-disabled channel is re-enabled.
 	//
+	// Deprecated: recovery now resets the score to full after a single clean
+	// probe, so this value is no longer consulted by the auto-recovery path.
+	// It is retained for callers that still reference it.
+	//
 	// Environment variable: CHANNEL_AUTO_RECOVER_CONSECUTIVE
 	// Default: 2
 	ChannelAutoRecoverConsecutive = env.Int("CHANNEL_AUTO_RECOVER_CONSECUTIVE", 2)
+
+	// ChannelHealthAutoDisableThreshold is the composite score below which an
+	// enabled channel is auto-disabled outright. Sliding a channel through the
+	// health bands only downranks it: with healthy peers present it receives no
+	// traffic and therefore never accumulates the observations that would let it
+	// recover. Auto-disabling it instead sends it through the periodic recovery
+	// test, which resets the score to full on success. Set to 0 to disable.
+	//
+	// Environment variable: CHANNEL_HEALTH_AUTO_DISABLE_THRESHOLD
+	// Default: 0.5
+	ChannelHealthAutoDisableThreshold = env.Float64("CHANNEL_HEALTH_AUTO_DISABLE_THRESHOLD", 0.5)
+
+	// LocalChannelProbeEnabled turns on the background supervisor for channels
+	// whose upstream is an IP literal (LAN/GPU nodes, a local llama.cpp). The
+	// supervisor pings the host first (ICMP, bounded) and only then does a TCP
+	// connect and an HTTP readiness check, so a powered-off host is taken out of
+	// rotation instead of black-holing requests for the full TCP SYN budget.
+	//
+	// Environment variable: LOCAL_CHANNEL_PROBE_ENABLED
+	// Default: true
+	LocalChannelProbeEnabled = env.Bool("LOCAL_CHANNEL_PROBE_ENABLED", true)
+
+	// LocalChannelProbeIntervalSec is how often the LAN supervisor probes each
+	// IP-literal channel. Local probes cost no upstream quota, so this can be
+	// far more aggressive than the public health prober.
+	//
+	// Environment variable: LOCAL_CHANNEL_PROBE_INTERVAL_SEC
+	// Default: 60
+	LocalChannelProbeIntervalSec = env.Int("LOCAL_CHANNEL_PROBE_INTERVAL_SEC", 60)
+
+	// LocalChannelProbeTimeoutMs bounds the ICMP/TCP/HTTP stages of one probe.
+	//
+	// Environment variable: LOCAL_CHANNEL_PROBE_TIMEOUT_MS
+	// Default: 1500
+	LocalChannelProbeTimeoutMs = env.Int("LOCAL_CHANNEL_PROBE_TIMEOUT_MS", 1500)
 
 	// ChannelSuspendBackoffBase is the initial suspension duration used by the
 	// exponential-backoff circuit breaker. Each consecutive failure multiplies

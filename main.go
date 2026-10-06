@@ -125,6 +125,17 @@ func main() {
 	if config.MemoryCacheEnabled && config.ChannelHealthProbeFrequency > 0 {
 		go controller.AutomaticallyProbeChannelHealth(ctx, config.ChannelHealthProbeFrequency)
 	}
+	// Auto-disable channels whose score has collapsed so they re-enter the
+	// recovery test instead of sleeping behind healthy peers forever.
+	if config.MemoryCacheEnabled {
+		go controller.AutomaticallyDisableUnhealthyChannels(ctx)
+	}
+	// LAN supervisor: ping-first reachability (and HTTP readiness) for
+	// IP-literal upstreams so a powered-off local node is taken out of
+	// rotation instead of black-holing requests.
+	if config.MemoryCacheEnabled {
+		go controller.AutomaticallyProbeLocalChannels(ctx)
+	}
 	if config.BatchUpdateEnabled {
 		logger.Logger.Info("batch update enabled with interval " + strconv.Itoa(config.BatchUpdateInterval) + "s")
 		model.InitBatchUpdater()

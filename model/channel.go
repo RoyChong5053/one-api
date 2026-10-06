@@ -50,6 +50,9 @@ type Channel struct {
 	UsedQuota          int64   `json:"used_quota" gorm:"bigint;default:0"`
 	ModelMapping       *string `json:"model_mapping" gorm:"type:text"`
 	Priority           *int64  `json:"priority" gorm:"bigint;default:0"`
+	// Favorite pins a channel to the top of the admin list. It is a pure UI
+	// convenience and never influences routing.
+	Favorite           bool    `json:"favorite" gorm:"default:false;index"`
 	Config             string  `json:"config"`
 	SystemPrompt       *string `json:"system_prompt" gorm:"type:text"`
 	RateLimit          *int    `json:"ratelimit" gorm:"column:ratelimit;default:0"`
@@ -89,6 +92,7 @@ func AttachHealthSnapshots(channels []*Channel) {
 
 var channelSortFields = map[string]string{
 	"id":            "id",
+	"favorite":      "favorite",
 	"name":          "name",
 	"type":          "type",
 	"status":        "status",
@@ -370,6 +374,8 @@ func GetAllChannels(startIdx int, num int, scope string, sortBy string, sortOrde
 	var err error
 
 	orderClause := ValidateOrderClause(sortBy, sortOrder, channelSortFields, "id desc")
+	// Favorites always float to the top, then the caller's chosen ordering.
+	orderClause = "favorite desc, " + orderClause
 
 	switch scope {
 	case "all":
@@ -1849,6 +1855,15 @@ func (channel *Channel) SetCompletionRatio(completionRatio map[string]float64) e
 	jsonStr := string(jsonBytes)
 	channel.CompletionRatio = &jsonStr
 	return nil
+}
+
+// SetChannelFavorite pins or unpins a channel in the admin list. It is a pure
+// UI preference and never changes routing or health.
+func SetChannelFavorite(id int, favorite bool) error {
+	if id == 0 {
+		return errors.New("channel id is required")
+	}
+	return DB.Model(&Channel{}).Where("id = ?", id).Update("favorite", favorite).Error
 }
 
 func UpdateChannelStatusById(id int, status int) {

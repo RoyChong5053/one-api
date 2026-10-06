@@ -568,6 +568,58 @@ func ResetConsecutiveChannelFailures(channelId int) {
 	h.consecutiveFailures = 0
 }
 
+// ResetChannelHealthToFull clears a channel's accumulated health history and
+// returns it to a clean, fully-healthy state. It is called when an
+// auto-disabled channel answers a recovery probe, so the score reflects the
+// live service rather than the failures that caused the disable.
+//
+// Everything is cleared, including the latency/throughput EWMAs: the goal is a
+// fresh verdict from the next observations, not a half-buried grudge. The
+// sample counter is kept at or above the floor so the channel reads healthy
+// rather than unknown; the selector groups unknown with degraded, which would
+// keep a freshly recovered channel out of the winning pool.
+func ResetChannelHealthToFull(channelId int) {
+	if channelId == 0 {
+		return
+	}
+	h := getOrCreateChannelHealth(channelId)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.successes = h.successes[:0]
+	h.consecutiveFailures = 0
+	h.consecutivePass = 0
+	h.successEwma = 1.0
+	h.windowSuccessRate = 1.0
+	h.latencyEwma = 0
+	h.ttftEwma = 0
+	h.tpsEwma = 0
+	h.cutEwma = 0
+	h.rateLimitEwma = 0
+	if h.samples < config.ChannelHealthMinSamples {
+		h.samples = config.ChannelHealthMinSamples
+	}
+	h.lastObservedAt = time.Now()
+}
+
+// GetChannelHealthScoreBelowThreshold reports whether an enabled channel's
+// composite score has fallen below threshold with enough observations to trust
+// it. Used by the enforcement loop that auto-disables sleeping channels so
+// they enter the recovery probe cycle instead of sitting skipped forever.
+func GetChannelHealthScoreBelowThreshold(channelId int, threshold float64) bool {
+	if threshold <= 0 {
+		return false
+	}
+	h := getOrCreateChannelHealth(channelId)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.samples < config.ChannelHealthMinSamples {
+		return false
+	}
+	score, _ := h.healthScoreLocked()
+	return score < threshold
+}
+
 // ConsecutiveCleanProbes returns how many clean probes in a row this channel
 // has recorded. Used as the auto-recovery gate.
 func ConsecutiveCleanProbes(channelId int) int {

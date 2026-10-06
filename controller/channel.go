@@ -456,6 +456,21 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 
+	// Favorite is a pure UI preference; update it on its own so a full channel
+	// payload is not required and GORM's zero-value skip cannot leave it set.
+	if c.Query("favorite_only") != "" {
+		if channel.Id == 0 {
+			helper.RespondError(c, errors.New("Channel id is required"))
+			return
+		}
+		if err := model.SetChannelFavorite(channel.Id, channel.Favorite); err != nil {
+			helper.RespondError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
+		return
+	}
+
 	// Disallow empty name on full update
 	if strings.TrimSpace(channel.Name) == "" {
 		helper.RespondError(c, errors.New("Channel name cannot be empty"))

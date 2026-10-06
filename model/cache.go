@@ -584,12 +584,11 @@ func CacheGetSatisfiedChannel(group string, model string, preferLowestPriority b
 		return nil, errors.Errorf("no channels in cache support model %s", model)
 	}
 
-	// Hard liveness gate: drop (and briefly suspend) candidates whose upstream
-	// IP endpoint is unreachable, so a dead channel that happens to be the only
-	// member of the top priority tier cannot absorb every request. Never moves
-	// the health score.
-	candidateChannels = filterLinkDead(group, model, candidateChannels)
-
+	// Liveness for IP-literal upstreams is handled out of band by the LAN
+	// supervisor (controller/channel_local_probe.go), which auto-disables an
+	// unreachable node and auto-recovers it. Keeping a probe on this path
+	// stalled every selection by the TCP blackhole budget and only suspended
+	// the channel for a window short enough that it was promptly re-selected.
 	endIdx := len(candidateChannels)
 	// choose by priority
 	if endIdx == 0 { // Should be caught by earlier check, but as a safeguard
@@ -739,11 +738,8 @@ func CacheGetSatisfiedChannelExcluding(group string, model string, preferLowestP
 		}
 	}
 
-	// Hard liveness gate: drop (and briefly suspend) candidates whose upstream
-	// IP endpoint is unreachable, so a dead channel that happens to be the only
-	// member of the top priority tier cannot absorb every request. Never moves
-	// the health score.
-	candidateChannels = filterLinkDead(group, model, candidateChannels)
+	// Liveness for IP-literal upstreams is handled out of band by the LAN
+	// supervisor; see CacheGetSatisfiedChannel for why it is not on this path.
 
 	// When preferLowestPriority is true, select from the lowest priority tier.
 	// When preferLowestPriority is false, select from the highest priority tier.

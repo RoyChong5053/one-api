@@ -925,26 +925,23 @@ func testChannels(ctx context.Context, notify bool, scope string) error {
 				LatencyMs: float64(milliseconds),
 			})
 
-			if !isChannelEnabled && err == nil && openaiErr == nil {
-				// Prefer the health engine's stricter gate: it requires
-				// repeated clean probes rather than one, so a provider that
-				// briefly stopped answering cannot be immediately put back
-				// into rotation the moment it answers once.
-				if recovered, why := model.ShouldAutoRecoverChannel(channel.Id); recovered {
-					lg.Info("auto-disabled channel recovered by channel test",
-						zap.Int("channel_id", channel.Id),
-						zap.String("channel_name", channel.Name),
-						zap.Int64("latency_ms", milliseconds),
-					)
-					monitor.EnableChannel(channel.Id, channel.Name)
-				} else if channel.Status == model.ChannelStatusAutoDisabled {
-					lg.Debug("auto-disabled channel still awaiting recovery",
-						zap.Int("channel_id", channel.Id),
-						zap.String("reason", why),
-					)
-				}
-			} else if !isChannelEnabled && (err == nil && monitor.ShouldEnableChannel(err, openaiErr)) {
+			if channel.Status == model.ChannelStatusAutoDisabled && err == nil && openaiErr == nil {
+				// A single clean probe brings an auto-disabled channel back.
+				// The failure history is cleared first so the channel returns
+				// at full score and is judged again from live traffic. Without
+				// the reset the old failure window would keep it below the
+				// recovery threshold for hours.
+				model.ResetChannelHealthToFull(channel.Id)
+				lg.Info("auto-disabled channel recovered by channel test",
+					zap.Int("channel_id", channel.Id),
+					zap.String("channel_name", channel.Name),
+					zap.Int64("latency_ms", milliseconds),
+				)
 				monitor.EnableChannel(channel.Id, channel.Name)
+			} else if channel.Status == model.ChannelStatusAutoDisabled {
+				lg.Debug("auto-disabled channel still awaiting recovery",
+					zap.Int("channel_id", channel.Id),
+				)
 			}
 			channel.UpdateResponseTime(milliseconds)
 			time.Sleep(config.RequestInterval)

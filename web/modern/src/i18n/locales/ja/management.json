@@ -8,6 +8,8 @@
       "duplicate": "複製",
       "edit": "編集",
       "enable": "有効化",
+      "favorite": "チャンネルをピン留め",
+      "unfavorite": "ピン留めを解除",
       "refresh_balance": "{{name}} の残高を更新",
       "test": "テスト"
     },

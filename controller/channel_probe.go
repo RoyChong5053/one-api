@@ -313,20 +313,14 @@ func applyProbeToChannelState(ctx context.Context, lg *glog.LoggerT, ch *model.C
 		return
 	}
 
-	// A slow-but-working probe must not re-enable the channel: it only
-	// proves the score is healthy enough, which is what the check below
-	// verifies.
+	// Only auto-disabled channels are eligible for automatic recovery; a
+	// manually disabled channel is never touched.
 	if ch.Status != model.ChannelStatusAutoDisabled {
 		return
 	}
-	recovered, why := model.ShouldAutoRecoverChannel(ch.Id)
-	if !recovered {
-		lg.Debug("auto-disabled channel not yet eligible for recovery",
-			zap.Int("channel_id", ch.Id),
-			zap.String("reason", why),
-		)
-		return
-	}
+	// One clean probe is enough: clear the accumulated failure history so the
+	// channel returns at full score and is judged again from live traffic.
+	model.ResetChannelHealthToFull(ch.Id)
 	monitor.EnableChannel(ch.Id, ch.Name)
 	lg.Info("auto-disabled channel recovered by health probe",
 		zap.Int("channel_id", ch.Id),
@@ -349,6 +343,70 @@ func ProbeChannels(c *gin.Context) {
 		"message": "",
 		"data":    gin.H{"probed": probed},
 	})
+}
+
+// EnforceUnhealthyChannelDisable auto-disables enabled channels whose composite
+// health score has fallen below ChannelHealthAutoDisableThreshold.
+//
+// Band gating alone only downranks a low-scoring channel: with healthy peers
+// present it receives no traffic, so it never accumulates the observations that
+// would let it recover and simply sleeps. Auto-disabling it instead routes it
+// through the periodic recovery test, which clears the history and returns it
+// at full score as soon as it answers. Manually disabled channels are never
+// touched.
+func EnforceUnhealthyChannelDisable() int {
+	threshold := config.ChannelHealthAutoDisableThreshold
+	if threshold <= 0 {
+		return 0
+	}
+	channels, err := model.GetAllChannels(0, 0, "all", "", "")
+	if err != nil {
+		return 0
+	}
+	lg := logger.Logger.Named("channel_health")
+	disabled := 0
+	for _, ch := range channels {
+		if ch == nil || ch.Status != model.ChannelStatusEnabled {
+			continue
+		}
+		if !model.GetChannelHealthScoreBelowThreshold(ch.Id, threshold) {
+			continue
+		}
+		snap := model.GetChannelHealthSnapshot(ch.Id)
+		reason := fmt.Sprintf("health score %.2f fell below the auto-disable threshold %.2f", snap.Score, threshold)
+		lg.Warn("auto-disabling unhealthy channel",
+			zap.Int("channel_id", ch.Id),
+			zap.String("channel_name", ch.Name),
+			zap.Float64("score", snap.Score),
+			zap.Float64("threshold", threshold),
+			zap.Strings("reasons", snap.Reasons),
+		)
+		monitor.DisableChannel(ch.Id, ch.Name, reason)
+		disabled++
+	}
+	return disabled
+}
+
+// AutomaticallyDisableUnhealthyChannels periodically sweeps enabled channels
+// and auto-disables any whose health score has collapsed.
+func AutomaticallyDisableUnhealthyChannels(ctx context.Context) {
+	if config.ChannelHealthAutoDisableThreshold <= 0 {
+		return
+	}
+	lg := logger.Logger.Named("channel_health")
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			lg.Info("unhealthy channel enforcement stopped")
+			return
+		case <-ticker.C:
+			if n := EnforceUnhealthyChannelDisable(); n > 0 {
+				lg.Info("auto-disabled unhealthy channels", zap.Int("count", n))
+			}
+		}
+	}
 }
 
 // AutomaticallyProbeChannelHealth runs the health prober on an interval until

@@ -140,17 +140,14 @@ func TestProcessError_Policies(t *testing.T) {
 	// Note: This test checks our mapping and durations, not DB side effects.
 
 	// Save and restore durations
-	orig429 := config.ChannelSuspendSecondsFor429
 	orig5xx := config.ChannelSuspendSecondsFor5XX
 	origAuth := config.ChannelSuspendSecondsForAuth
 	t.Cleanup(func() {
-		config.ChannelSuspendSecondsFor429 = orig429
 		config.ChannelSuspendSecondsFor5XX = orig5xx
 		config.ChannelSuspendSecondsForAuth = origAuth
 	})
 
 	// Set non-zero, small test durations
-	config.ChannelSuspendSecondsFor429 = 10 * time.Second
 	config.ChannelSuspendSecondsFor5XX = 5 * time.Second
 	config.ChannelSuspendSecondsForAuth = 15 * time.Second
 

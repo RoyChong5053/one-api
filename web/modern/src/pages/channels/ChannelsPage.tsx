@@ -29,6 +29,7 @@ interface Channel {
   name: string;
   type: number;
   status: number;
+  favorite?: boolean;
   response_time?: number;
   created_time: number;
   updated_time?: number;
@@ -372,6 +373,31 @@ export function ChannelsPage() {
       load(pageIndex, pageSize);
     }
   }, [sortBy, sortOrder]);
+
+  // toggleFavorite pins/unpins a channel. Updated optimistically, then the list
+  // is reloaded so the new ordering (favorites first) takes effect.
+  const toggleFavorite = async (id: number, favorite: boolean) => {
+    setData((prev) => prev.map((c) => (c.id === id ? { ...c, favorite } : c)));
+    try {
+      const res = await api.put('/api/channel/?favorite_only=1', { id, favorite });
+      if (!res.data?.success) {
+        throw new Error(res.data?.message || 'failed to update favorite');
+      }
+      if (searchKeyword.trim()) {
+        performSearch();
+      } else {
+        load(pageIndex, pageSize);
+      }
+    } catch (error) {
+      // Roll back the optimistic update.
+      setData((prev) => prev.map((c) => (c.id === id ? { ...c, favorite: !favorite } : c)));
+      notify({
+        type: 'error',
+        title: t('channels.notifications.status_failed_title', 'Update failed'),
+        message: error instanceof Error ? error.message : t('channels.notifications.status_failed_message', 'Failed to update channel.'),
+      });
+    }
+  };
 
   const manage = async (id: number, action: 'enable' | 'disable' | 'delete' | 'test', index?: number) => {
     try {
@@ -1012,7 +1038,9 @@ export function ChannelsPage() {
 
   const toolbarActions = (
     <div className={cn('flex gap-2 flex-wrap max-w-full', isMobile ? 'flex-col w-full' : 'items-center')}>
-      <div className="flex gap-2 w-full md:w-auto">
+      {/* On phones the five toolbar buttons must wrap into a grid; a single
+          nowrap row is wider than the viewport and pushes the page sideways. */}
+      <div className={cn('gap-2 w-full md:w-auto', isMobile ? 'grid grid-cols-2' : 'flex')}>
         <Button
           variant="outline"
           onClick={handleBulkTest}
@@ -1122,6 +1150,7 @@ export function ChannelsPage() {
                         onRefreshBalance={() => {
                           void handleBalanceRefresh(row);
                         }}
+                        onToggleFavorite={() => void toggleFavorite(row.id, !row.favorite)}
                         onPriorityChange={(value, field) =>
                           handleRoutingFieldUpdate(row, field === 'weight' ? 'weight' : 'priority', value)
                         }
