@@ -322,13 +322,15 @@ export function EnhancedDataTable<TData, TValue>({
                 disabled={loading}
                 variant="outline"
                 size={compactMode || isMobile ? 'sm' : 'sm'}
-                className={cn(isMobile ? 'flex-1 touch-target' : '', 'gap-2')}
+                className={cn(isMobile ? 'touch-target' : '', 'gap-2')}
               >
                 <RotateCcw className="h-4 w-4" />
                 {!compactMode && !isMobile && t('common.refresh', 'Refresh')}
               </Button>
             )}
-            <div className={cn(isMobile ? 'flex gap-2 flex-1' : 'flex gap-2')}>{toolbarActions}</div>
+            {/* Full width on phones so a toolbar that renders its own grid is
+                not squeezed into half a row next to the refresh button. */}
+            <div className={cn(isMobile ? 'w-full' : 'flex gap-2')}>{toolbarActions}</div>
           </div>
         </div>
       )}
@@ -343,8 +345,11 @@ export function EnhancedDataTable<TData, TValue>({
         )}
 
         {/* Card Layout (phone-only by default, all widths when cardLayout="always") */}
+        {/* grid-cols-1 keeps the mobile track at minmax(0,1fr); without it the
+            implicit auto track sizes to the card's min-content (~625px) and
+            pushes the whole page sideways on phones. */}
         {showCards ? (
-          <div className={cn(cardGridClassName ?? 'space-y-4', renderCard && 'grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4')}>
+          <div className={cn(cardGridClassName ?? 'space-y-4', renderCard && 'grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4')}>
             {table.getRowModel().rows?.length ? (
               table.getRowModel().rows.map((row) => {
                 // A caller-supplied card replaces the generic label/value

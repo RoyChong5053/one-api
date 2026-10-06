@@ -1045,7 +1045,7 @@ export function ChannelsPage() {
           variant="outline"
           onClick={handleBulkTest}
           disabled={bulkTesting || loading}
-          className={cn('gap-2 flex-1 md:flex-none whitespace-nowrap', isMobile ? 'touch-target' : '')}
+          className={cn('gap-2 flex-1 md:flex-none whitespace-nowrap', isMobile ? 'touch-target text-xs' : '')}
           size="sm"
         >
           {bulkTesting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
@@ -1055,7 +1055,7 @@ export function ChannelsPage() {
           variant="outline"
           onClick={handleBulkBalanceRefresh}
           disabled={bulkBusy || loading}
-          className={cn('gap-2 flex-1 md:flex-none whitespace-nowrap', isMobile ? 'touch-target' : '')}
+          className={cn('gap-2 flex-1 md:flex-none whitespace-nowrap', isMobile ? 'touch-target text-xs' : '')}
           size="sm"
         >
           <Banknote className="h-4 w-4" />
@@ -1069,7 +1069,7 @@ export function ChannelsPage() {
               variant="outline"
               size="sm"
               disabled={bulkBusy || loading || data.length === 0}
-              className={cn('gap-2 flex-1 md:flex-none whitespace-nowrap', isMobile ? 'touch-target' : '')}
+              className={cn('gap-2 flex-1 md:flex-none whitespace-nowrap', isMobile ? 'touch-target text-xs' : '')}
             >
               {t('channels.toolbar.bulk_actions', 'Bulk Actions')}
               <ChevronDown className="h-4 w-4" />
@@ -1089,7 +1089,7 @@ export function ChannelsPage() {
         <Button
           variant="destructive"
           onClick={handleDeleteDisabled}
-          className={cn('gap-2 flex-1 md:flex-none whitespace-nowrap', isMobile ? 'touch-target' : '')}
+          className={cn('gap-2 flex-1 md:flex-none whitespace-nowrap', isMobile ? 'touch-target text-xs' : '')}
           size="sm"
         >
           <Trash2 className="h-4 w-4" />
@@ -1099,7 +1099,7 @@ export function ChannelsPage() {
           variant="outline"
           size="sm"
           onClick={() => switchViewMode(viewMode === 'cards' ? 'table' : 'cards')}
-          className={cn('gap-2 whitespace-nowrap', isMobile ? 'touch-target' : '')}
+          className={cn('gap-2 whitespace-nowrap', isMobile ? 'touch-target text-xs' : '')}
           title={t('channels.toolbar.toggle_view', 'Switch between card and table layout')}
         >
           {viewMode === 'cards' ? <Rows className="h-4 w-4" /> : <LayoutGrid className="h-4 w-4" />}

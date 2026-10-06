@@ -67,8 +67,10 @@ export function PasskeyPromptBanner() {
 
   if (!visible) return null;
 
+  // w-auto (not the Banner default w-full) so the horizontal margins are
+  // subtracted from the width instead of pushing past the viewport.
   return (
-    <Banner variant="info" density="slim" onDismiss={dismiss} dismissLabel={t('passkey_prompt.dismiss')} className="mx-2 mt-2 md:mx-4">
+    <Banner variant="info" density="slim" onDismiss={dismiss} dismissLabel={t('passkey_prompt.dismiss')} className="mx-2 mt-2 w-auto md:mx-4">
       <BannerIcon>
         <KeyRound />
       </BannerIcon>
