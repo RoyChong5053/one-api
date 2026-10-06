@@ -840,6 +840,20 @@ func testChannels(ctx context.Context, notify bool, scope string) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to get all channels")
 	}
+	// The periodic recovery test spends one upstream request per channel. Free
+	// channels opt out of proactive spending; they recover when real traffic
+	// succeeds after a quota reset. Manual tests (scope != auto_disabled) are
+	// never filtered, so an operator can always force a check.
+	if scope == "auto_disabled" {
+		filtered := channels[:0]
+		for _, ch := range channels {
+			if ch == nil || !ch.Policy().AutoTestOnDisabled {
+				continue
+			}
+			filtered = append(filtered, ch)
+		}
+		channels = filtered
+	}
 	go func() {
 		lg := gmw.GetLogger(ctx)
 		for _, channel := range channels {

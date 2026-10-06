@@ -409,6 +409,10 @@ func rebuildSuspendedChannelsFromDB() {
 }
 
 func InitChannelCache() {
+	// One-time migration: label pre-existing IP-literal channels as local so
+	// they keep liveness-only automation instead of paid performance rules.
+	BackfillLocalCostClass()
+
 	newChannelId2channel := make(map[int]*Channel)
 	var channels []*Channel
 	DB.Where("status = ?", ChannelStatusEnabled).Find(&channels)

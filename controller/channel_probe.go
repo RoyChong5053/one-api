@@ -218,6 +218,11 @@ func probeTargets() []*model.Channel {
 		if channel.Status != model.ChannelStatusEnabled {
 			continue
 		}
+		// Free channels opt out of proactive probing to protect quota; local
+		// channels keep it (probing them is free).
+		if !channel.Policy().ProactiveProbe {
+			continue
+		}
 		if model.ChannelNeedsProbe(channel.Id) {
 			targets = append(targets, channel)
 		}
@@ -367,6 +372,12 @@ func EnforceUnhealthyChannelDisable() int {
 	disabled := 0
 	for _, ch := range channels {
 		if ch == nil || ch.Status != model.ChannelStatusEnabled {
+			continue
+		}
+		// Performance-driven auto-disable is a paid-fleet optimisation. Free and
+		// local channels are never taken out of rotation for being slow; they are
+		// only downranked by the health band.
+		if !ch.Policy().ScoreMayDisable {
 			continue
 		}
 		if !model.GetChannelHealthScoreBelowThreshold(ch.Id, threshold) {

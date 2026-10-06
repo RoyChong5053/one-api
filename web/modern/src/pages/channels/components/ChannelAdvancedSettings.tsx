@@ -2,6 +2,7 @@ import type { UseFormReturn } from 'react-hook-form';
 import { Button } from '@/components/ui/button';
 import { FormControl, FormField, FormItem, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { INFERENCE_PROFILE_ARN_MAP_EXAMPLE } from '../constants';
 import { formatJSON } from '../helpers';
@@ -81,6 +82,35 @@ export const ChannelAdvancedSettings = ({ form, normalizedChannelType, tr }: Cha
             <FormControl>
               <Input type="number" min="0" className={errorClass('ratelimit')} {...field} />
             </FormControl>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+
+      <FormField
+        control={form.control}
+        name="cost_class"
+        render={({ field }) => (
+          <FormItem>
+            <LabelWithHelp
+              label={tr('cost_class.label', 'Cost Class')}
+              help={tr(
+                'cost_class.help',
+                'Automation policy. paid: full health automation, slow channels may be disabled. free: quota-limited, never disabled for rate limits or slowness, and not probed proactively to protect quota. local: self-hosted, slow is expected, only liveness failure disables it.'
+              )}
+            />
+            <Select onValueChange={field.onChange} value={field.value || 'paid'}>
+              <FormControl>
+                <SelectTrigger className={errorClass('cost_class')}>
+                  <SelectValue placeholder={tr('cost_class.placeholder', 'paid')} />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                <SelectItem value="paid">{tr('cost_class.paid', 'Paid')}</SelectItem>
+                <SelectItem value="free">{tr('cost_class.free', 'Free (quota-limited)')}</SelectItem>
+                <SelectItem value="local">{tr('cost_class.local', 'Local (self-hosted)')}</SelectItem>
+              </SelectContent>
+            </Select>
             <FormMessage />
           </FormItem>
         )}

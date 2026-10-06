@@ -28,6 +28,8 @@ export const createChannelSchema = (tr?: SchemaTranslationFn) => {
     priority: z.coerce.number().int().default(0),
     weight: z.coerce.number().int().default(0),
     ratelimit: z.coerce.number().int().min(0).default(0),
+    // Automation policy class: paid (default) / free (quota-limited) / local (self-hosted).
+    cost_class: z.enum(['paid', 'free', 'local']).default('paid'),
     // AWS and Vertex AI specific config
     config: z
       .object({

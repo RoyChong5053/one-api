@@ -53,6 +53,9 @@ type Channel struct {
 	// Favorite pins a channel to the top of the admin list. It is a pure UI
 	// convenience and never influences routing.
 	Favorite           bool    `json:"favorite" gorm:"default:false;index"`
+	// CostClass selects the automation policy for this channel. See
+	// model/channel_policy.go. Empty is treated as "paid".
+	CostClass          string  `json:"cost_class" gorm:"type:varchar(16);index"`
 	Config             string  `json:"config"`
 	SystemPrompt       *string `json:"system_prompt" gorm:"type:text"`
 	RateLimit          *int    `json:"ratelimit" gorm:"column:ratelimit;default:0"`

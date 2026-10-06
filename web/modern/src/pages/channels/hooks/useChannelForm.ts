@@ -75,6 +75,7 @@ export const useChannelForm = () => {
       priority: 0,
       weight: 0,
       ratelimit: 0,
+      cost_class: 'paid',
       config: {
         region: '',
         ak: '',
@@ -275,6 +276,7 @@ export const useChannelForm = () => {
           priority: toInt(data.priority, 0),
           weight: toInt(data.weight, 0),
           ratelimit: toInt(data.ratelimit, 0),
+          cost_class: data.cost_class === 'free' || data.cost_class === 'local' ? data.cost_class : 'paid',
           config,
           inference_profile_arn_map: formatJsonField(data.inference_profile_arn_map),
         };

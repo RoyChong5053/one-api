@@ -914,6 +914,13 @@ func calculateBackoffDuration(channelId int, isAuthOrQuota bool) time.Duration {
 func processChannelRelayError(ctx context.Context, params processChannelRelayErrorParams) {
 	// Always use a local logger variable
 	lg := gmw.GetLogger(ctx)
+	// Cost-class policy: free and local channels are not managed like a paid
+	// fleet. Failures still trigger per-request fallback, but only a paid
+	// channel is auto-disabled for rate limits or stream cuts.
+	policy := dbmodel.PolicyFor("")
+	if ch, err := dbmodel.GetChannelById(params.ChannelId, false); err == nil && ch != nil {
+		policy = ch.Policy()
+	}
 	isUserError := isUserOriginatedRelayError(&params.Err)
 
 	// Downgrade to WARN for client-side cancellations/timeouts and user-originated errors
@@ -969,21 +976,28 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 
 	if params.Err.StatusCode == http.StatusTooManyRequests {
 		backoff := calculateBackoffDuration(params.ChannelId, false)
-		lg.Error("ability suspended due to rate limit (429)",
-			appendRelayFailureFields(params,
-				zap.Error(params.Err.RawError),
-				zap.String("suspension_rationale", "upstream rate limit exceeded; suspending ability to allow cooldown"),
-				zap.Duration("suspension_duration", backoff),
-			)...,
-		)
-		if suspendErr := dbmodel.SuspendAbility(ctx,
-			params.Group, params.OriginalModel, params.ChannelId,
-			backoff); suspendErr != nil {
-			lg.Error("failed to suspend ability for channel",
+		// Free tiers cap the 429 cooldown: a 429 costs no quota, so staying
+		// parked for the full paid backoff only delays claiming free quota.
+		if policy.RateLimitSuspendCap > 0 && backoff > policy.RateLimitSuspendCap {
+			backoff = policy.RateLimitSuspendCap
+		}
+		if policy.SuspendOnRateLimit {
+			lg.Error("ability suspended due to rate limit (429)",
 				appendRelayFailureFields(params,
-					zap.Error(errors.Wrap(suspendErr, "suspend ability failed")),
+					zap.Error(params.Err.RawError),
+					zap.String("suspension_rationale", "upstream rate limit exceeded; suspending ability to allow cooldown"),
+					zap.Duration("suspension_duration", backoff),
 				)...,
 			)
+			if suspendErr := dbmodel.SuspendAbility(ctx,
+				params.Group, params.OriginalModel, params.ChannelId,
+				backoff); suspendErr != nil {
+				lg.Error("failed to suspend ability for channel",
+					appendRelayFailureFields(params,
+						zap.Error(errors.Wrap(suspendErr, "suspend ability failed")),
+					)...,
+				)
+			}
 		}
 
 		// Escalate to channel-level auto-disable after repeated 429s.
@@ -993,16 +1007,23 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 		// a persistently rate-limited channel is eventually taken out of rotation.
 		// Recovery is handled by the health engine, which requires repeated clean
 		// probes rather than a single passing test.
-		consecutiveFailures := dbmodel.GetConsecutiveChannelFailures(params.ChannelId)
-		if consecutiveFailures >= 3 {
-			lg.Error("channel disabled due to repeated rate limit (429)",
-				appendRelayFailureFields(params,
-					zap.Int("consecutive_failures", consecutiveFailures),
-					zap.String("disable_rationale", "repeated 429 errors indicate persistent quota exhaustion; channel automatically disabled"),
-				)...,
-			)
-			monitor.DisableChannel(params.ChannelId, params.ChannelName,
-				fmt.Sprintf("rate limited after %d consecutive failures", consecutiveFailures))
+		//
+		// Free and local channels never take this path: for a free tier a 429
+		// means "quota exhausted, come back later", not "broken", and disabling
+		// it would route it into a recovery test that spends the very quota that
+		// has not reset yet.
+		if policy.DisableOnRateLimit {
+			consecutiveFailures := dbmodel.GetConsecutiveChannelFailures(params.ChannelId)
+			if consecutiveFailures >= 3 {
+				lg.Error("channel disabled due to repeated rate limit (429)",
+					appendRelayFailureFields(params,
+						zap.Int("consecutive_failures", consecutiveFailures),
+						zap.String("disable_rationale", "repeated 429 errors indicate persistent quota exhaustion; channel automatically disabled"),
+					)...,
+				)
+				monitor.DisableChannel(params.ChannelId, params.ChannelName,
+					fmt.Sprintf("rate limited after %d consecutive failures", consecutiveFailures))
+			}
 		}
 
 		monitor.Emit(params.ChannelId, false)
@@ -1057,7 +1078,7 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 		// selection routes around it; the periodic auto_disabled channel test
 		// re-enables it once it passes. Other 5xx errors stay transient (suspend
 		// only) to avoid disabling healthy channels on one-off upstream blips.
-		if isStreamCutRelayError(&params.Err) && config.StreamCutDisableThreshold > 0 {
+		if policy.DisableOnStreamCut && isStreamCutRelayError(&params.Err) && config.StreamCutDisableThreshold > 0 {
 			consecutiveFailures := dbmodel.GetConsecutiveChannelFailures(params.ChannelId)
 			if consecutiveFailures >= config.StreamCutDisableThreshold {
 				lg.Error("channel disabled due to repeated upstream stream cuts",
