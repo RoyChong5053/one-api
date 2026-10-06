@@ -67,6 +67,11 @@ type AutomationPolicy struct {
 	// SuspendOnRateLimit parks the ability for a cooldown on 429 instead of
 	// hammering a rate-limited upstream.
 	SuspendOnRateLimit bool
+	// SuspendOnServerError parks the ability on a 5xx upstream error. Local
+	// channels disable this: a single erroring request from a self-hosted server
+	// should fall back per-request, not lock the channel out for a backoff window
+	// that ratchets up with every failure.
+	SuspendOnServerError bool
 	// RateLimitSuspendCap bounds the 429 cooldown when non-zero. Free tiers use
 	// a short cap: a 429 costs no quota, so there is no reason to stay parked
 	// for an hour before trying to claim quota again.
@@ -85,31 +90,34 @@ func PolicyFor(costClass string) AutomationPolicy {
 	switch NormalizeCostClass(costClass) {
 	case CostClassLocal:
 		return AutomationPolicy{
-			ScoreMayDisable:    false,
-			DisableOnRateLimit: false,
-			DisableOnStreamCut: false,
-			SuspendOnRateLimit: false,
-			ProactiveProbe:     true,
-			AutoTestOnDisabled: true,
+			ScoreMayDisable:      false,
+			DisableOnRateLimit:   false,
+			DisableOnStreamCut:   false,
+			SuspendOnRateLimit:   false,
+			SuspendOnServerError: false,
+			ProactiveProbe:       true,
+			AutoTestOnDisabled:   true,
 		}
 	case CostClassFree:
 		return AutomationPolicy{
-			ScoreMayDisable:     false,
-			DisableOnRateLimit:  false,
-			DisableOnStreamCut:  true,
-			SuspendOnRateLimit:  true,
-			RateLimitSuspendCap: 5 * time.Minute,
-			ProactiveProbe:      false,
-			AutoTestOnDisabled:  true,
+			ScoreMayDisable:      false,
+			DisableOnRateLimit:   false,
+			DisableOnStreamCut:   true,
+			SuspendOnRateLimit:   true,
+			SuspendOnServerError: true,
+			RateLimitSuspendCap:  5 * time.Minute,
+			ProactiveProbe:       false,
+			AutoTestOnDisabled:   true,
 		}
 	default: // CostClassPaid
 		return AutomationPolicy{
-			ScoreMayDisable:    true,
-			DisableOnRateLimit: true,
-			DisableOnStreamCut: true,
-			SuspendOnRateLimit: true,
-			ProactiveProbe:     true,
-			AutoTestOnDisabled: true,
+			ScoreMayDisable:      true,
+			DisableOnRateLimit:   true,
+			DisableOnStreamCut:   true,
+			SuspendOnRateLimit:   true,
+			SuspendOnServerError: true,
+			ProactiveProbe:       true,
+			AutoTestOnDisabled:   true,
 		}
 	}
 }

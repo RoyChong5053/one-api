@@ -26,7 +26,7 @@ func TestNormalizeCostClass(t *testing.T) {
 func TestPolicyForPaidMatchesLegacyBehaviour(t *testing.T) {
 	p := PolicyFor("")
 	if !p.ScoreMayDisable || !p.DisableOnRateLimit || !p.DisableOnStreamCut ||
-		!p.SuspendOnRateLimit || !p.ProactiveProbe || !p.AutoTestOnDisabled {
+		!p.SuspendOnRateLimit || !p.SuspendOnServerError || !p.ProactiveProbe || !p.AutoTestOnDisabled {
 		t.Fatalf("paid policy must keep every automation enabled, got %+v", p)
 	}
 	if p.RateLimitSuspendCap != 0 {
@@ -60,6 +60,9 @@ func TestPolicyForLocalStaysLivenessOnly(t *testing.T) {
 	p := PolicyFor("local")
 	if p.ScoreMayDisable || p.DisableOnRateLimit || p.DisableOnStreamCut {
 		t.Error("local channel must not be auto-disabled for performance/rate limits/cuts")
+	}
+	if p.SuspendOnRateLimit || p.SuspendOnServerError {
+		t.Error("local channel must not be suspended across requests; fall back per-request instead")
 	}
 	if !p.ProactiveProbe {
 		t.Error("probing a local channel is free, it should stay enabled")

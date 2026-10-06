@@ -306,8 +306,18 @@ func runHealthProbeTick(ctx context.Context) int {
 // channel that has proven itself gets re-enabled.
 func applyProbeToChannelState(ctx context.Context, lg *glog.LoggerT, ch *model.Channel, obs model.ChannelObservation) {
 	// Latency past the hang threshold means the channel is not slow, it is
-	// wedged. Disable it outright rather than merely downranking it.
+	// wedged. Disable it outright rather than merely downranking it. This is a
+	// paid-fleet heuristic: a slow probe from a local or free channel is
+	// expected, so those classes are only downranked by the health band.
 	if obs.Kind == model.OutcomeSuccess && obs.LatencyMs >= float64(config.ChannelHealthDisableLatencyMs) {
+		if !ch.Policy().ScoreMayDisable {
+			lg.Debug("hung-probe disable skipped for non-paid channel",
+				zap.Int("channel_id", ch.Id),
+				zap.String("channel_name", ch.Name),
+				zap.Float64("latency_ms", obs.LatencyMs),
+			)
+			return
+		}
 		reason := formatProbeLatencyDisable(obs.LatencyMs)
 		lg.Warn("channel auto-disabled after hung health probe",
 			zap.Int("channel_id", ch.Id),

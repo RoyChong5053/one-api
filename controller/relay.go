@@ -1058,18 +1058,27 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 		}
 
 		backoff := calculateBackoffDuration(params.ChannelId, false)
-		lg.Error("ability suspended due to server error (5xx)",
-			appendRelayFailureFields(params,
-				zap.Error(params.Err.RawError),
-				zap.String("suspension_rationale", "upstream server error; suspending ability to allow recovery"),
-				zap.Duration("suspension_duration", backoff),
-			)...,
-		)
-		if suspendErr := dbmodel.SuspendAbility(ctx, params.Group, params.OriginalModel, params.ChannelId, backoff); suspendErr != nil {
-			lg.Error("failed to suspend ability for 5xx",
+		// Local channels do not park the ability on a 5xx: a self-hosted server
+		// that errors on one request should fall back per-request and be tried
+		// again next time, not locked out for an exponentially growing window.
+		if policy.SuspendOnServerError {
+			lg.Error("ability suspended due to server error (5xx)",
 				appendRelayFailureFields(params,
-					zap.Error(errors.Wrap(suspendErr, "suspend ability failed")),
+					zap.Error(params.Err.RawError),
+					zap.String("suspension_rationale", "upstream server error; suspending ability to allow recovery"),
+					zap.Duration("suspension_duration", backoff),
 				)...,
+			)
+			if suspendErr := dbmodel.SuspendAbility(ctx, params.Group, params.OriginalModel, params.ChannelId, backoff); suspendErr != nil {
+				lg.Error("failed to suspend ability for 5xx",
+					appendRelayFailureFields(params,
+						zap.Error(errors.Wrap(suspendErr, "suspend ability failed")),
+					)...,
+				)
+			}
+		} else {
+			lg.Debug("5xx not suspending ability for this cost class",
+				appendRelayFailureFields(params, zap.Duration("would_suspend_for", backoff))...,
 			)
 		}
 
