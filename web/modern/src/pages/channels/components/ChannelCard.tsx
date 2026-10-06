@@ -213,23 +213,25 @@ export function ChannelCard({
         channel.status === CHANNEL_STATUS_AUTO_DISABLED && 'border-warning-border/60'
       )}
     >
-      {/* Header: identity and verdict */}
-      <div className="flex items-start justify-between gap-2">
+      {/* Header: identity and verdict.
+          On phones the badges stack below the name so a long model name gets
+          the full width and can wrap instead of collapsing to "Nvidia/...". */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex items-start gap-2">
             {typeColor && (
-              <span className="inline-block h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: typeColor }} />
+              <span className="mt-1.5 inline-block h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: typeColor }} />
             )}
             <button
               type="button"
               onClick={onToggleFavorite}
               aria-label={t('channels.actions.favorite', 'Pin channel')}
               title={channel.favorite ? t('channels.actions.unfavorite', 'Unpin channel') : t('channels.actions.favorite', 'Pin channel')}
-              className="flex-shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-yellow-500"
+              className="mt-0.5 flex-shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-yellow-500"
             >
               <Star className={cn('h-3.5 w-3.5', channel.favorite && 'fill-current text-yellow-500')} />
             </button>
-            <span className="truncate font-medium" title={channel.name}>
+            <span className="min-w-0 break-words font-medium sm:truncate" title={channel.name}>
               {channel.name}
             </span>
           </div>
@@ -245,7 +247,7 @@ export function ChannelCard({
             <span className="font-mono">#{channel.id}</span>
           </div>
         </div>
-        <div className="flex flex-shrink-0 flex-col items-end gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 sm:flex-shrink-0 sm:flex-col sm:items-end">
           <HealthBadge health={health} />
           <StatusBadge status={channel.status} priority={channel.priority} />
         </div>
